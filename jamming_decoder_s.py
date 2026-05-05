@@ -74,10 +74,7 @@ def parse_0x0A06(data):
     clean_key = "".join([chr(b) for b in raw_key if 32 <= b <= 126]).strip()
     
     if len(clean_key) > 0:
-        print(f"\n========================================================")
-        print(f"📡 [战术反制] 成功破译敌方干扰密码 !!!")
-        print(f"🔑 Key -> [ {clean_key} ]")
-        print(f"========================================================\n")
+        print(f"捕获Key ->  {clean_key} ")
         
         # 你的下一步任务：把这个 clean_key 通过串口发给大疆主控板 (命令码 0x0121)
 
@@ -86,8 +83,7 @@ def parse_0x0A06(data):
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, UDP_PORT))
-    print(f"[*] 幽灵侦察兵(干扰波专属解析器)已启动 UDP {UDP_PORT} ...")
-    print(f"[*] 正在静默监听干扰源特征: {ACCESS_CODE_BITS[:16]}... (0x{ACCESS_CODE_HEX[:4]}...)")
+    print(f"干扰波解析器已启动 UDP {UDP_PORT} ...")
     
     bit_buffer = ""
     serial_buffer = bytearray()
