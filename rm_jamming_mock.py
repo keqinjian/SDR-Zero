@@ -62,7 +62,8 @@ class JammingTransmitter:
         
         # 【核心修改】：干扰源专属空口密码！(大喇叭，0x16E8 开头)
         self.JAMMING_ACCESS_CODE = bytes([0x16, 0xE8, 0xD3, 0x77, 0x15, 0x1C, 0x71, 0x2D])
-        self.HEADER = bytes([0x0F, 0x00, 0x0F, 0x00])
+        #self.HEADER = bytes([0x0F, 0x00, 0x0F, 0x00])
+        self.HEADER = bytes([0x00, 0x0F, 0x00, 0x0F])
 
     def build_rm_frame(self, cmd_id, data):
         """生成标准串口帧"""

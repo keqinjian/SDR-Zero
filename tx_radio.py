@@ -7,7 +7,7 @@
 # GNU Radio Python Flow Graph
 # Title: Not titled yet
 # Author: keqinjian
-# GNU Radio version: 3.8.1.0
+# GNU Radio version: v3.8.5.0-6-g57bd109d
 
 from distutils.version import StrictVersion
 
@@ -35,6 +35,12 @@ from argparse import ArgumentParser
 from gnuradio.eng_arg import eng_float, intx
 from gnuradio import eng_notation
 import iio
+try:
+    from xmlrpc.server import SimpleXMLRPCServer
+except ImportError:
+    from SimpleXMLRPCServer import SimpleXMLRPCServer
+import threading
+
 from gnuradio import qtgui
 
 class tx_radio(gr.top_block, Qt.QWidget):
@@ -73,13 +79,18 @@ class tx_radio(gr.top_block, Qt.QWidget):
         ##################################################
         # Variables
         ##################################################
-        self.target_sens = target_sens = 2.8323
+        self.target_sens = target_sens = 0.6646
         self.target_freq = target_freq = 434920000
         self.samp_rate = samp_rate = 1000000
 
         ##################################################
         # Blocks
         ##################################################
+        self.xmlrpc_server_0 = SimpleXMLRPCServer(('localhost', 8080), allow_none=True)
+        self.xmlrpc_server_0.register_instance(self)
+        self.xmlrpc_server_0_thread = threading.Thread(target=self.xmlrpc_server_0.serve_forever)
+        self.xmlrpc_server_0_thread.daemon = True
+        self.xmlrpc_server_0_thread.start()
         self.qtgui_freq_sink_x_0 = qtgui.freq_sink_c(
             1024, #size
             firdes.WIN_BLACKMAN_hARRIS, #wintype
@@ -119,12 +130,12 @@ class tx_radio(gr.top_block, Qt.QWidget):
             self.qtgui_freq_sink_x_0.set_line_alpha(i, alphas[i])
 
         self._qtgui_freq_sink_x_0_win = sip.wrapinstance(self.qtgui_freq_sink_x_0.pyqwidget(), Qt.QWidget)
-        self.top_grid_layout.addWidget(self._qtgui_freq_sink_x_0_win)
+        self.top_layout.addWidget(self._qtgui_freq_sink_x_0_win)
         self.iio_pluto_source_0 = iio.pluto_source('ip:192.168.2.1', target_freq, 1000000, 1000000, 32768, True, True, True, 'manual', 20, '', True)
-        self.iio_pluto_sink_0 = iio.pluto_sink('ip:192.168.2.1', target_freq, 1000000, 1000000, 32768, False, 10, '', True)
+        self.iio_pluto_sink_0 = iio.pluto_sink('ip:192.168.2.1', target_freq, 1000000, 250000, 32768, False, 10, '', True)
         self.digital_gfsk_mod_0 = digital.gfsk_mod(
             samples_per_symbol=52,
-            sensitivity=target_sens,
+            sensitivity=0.6646,
             bt=0.35,
             verbose=False,
             log=False)
@@ -139,8 +150,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
             log=False)
         self.blocks_udp_source_0 = blocks.udp_source(gr.sizeof_char*1, '127.0.0.1', 12347, 1472, True)
         self.blocks_udp_sink_0 = blocks.udp_sink(gr.sizeof_char*1, '127.0.0.1', 14348, 1472, True)
-        self.analog_simple_squelch_cc_0 = analog.simple_squelch_cc(-50, 0.001)
-
+        self.analog_simple_squelch_cc_0 = analog.simple_squelch_cc(-100, 0.001)
 
 
         ##################################################
@@ -152,6 +162,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
         self.connect((self.digital_gfsk_mod_0, 0), (self.iio_pluto_sink_0, 0))
         self.connect((self.iio_pluto_source_0, 0), (self.analog_simple_squelch_cc_0, 0))
         self.connect((self.iio_pluto_source_0, 0), (self.qtgui_freq_sink_x_0, 0))
+
 
     def closeEvent(self, event):
         self.settings = Qt.QSettings("GNU Radio", "tx_radio")
@@ -169,7 +180,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
 
     def set_target_freq(self, target_freq):
         self.target_freq = target_freq
-        self.iio_pluto_sink_0.set_params(self.target_freq, 1000000, 1000000, 10, '', True)
+        self.iio_pluto_sink_0.set_params(self.target_freq, 1000000, 250000, 10, '', True)
         self.iio_pluto_source_0.set_params(self.target_freq, 1000000, 1000000, True, True, True, 'manual', 20, '', True)
 
     def get_samp_rate(self):
@@ -181,6 +192,8 @@ class tx_radio(gr.top_block, Qt.QWidget):
 
 
 
+
+
 def main(top_block_cls=tx_radio, options=None):
 
     if StrictVersion("4.5.0") <= StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):
@@ -189,7 +202,9 @@ def main(top_block_cls=tx_radio, options=None):
     qapp = Qt.QApplication(sys.argv)
 
     tb = top_block_cls()
+
     tb.start()
+
     tb.show()
 
     def sig_handler(sig=None, frame=None):
@@ -205,9 +220,9 @@ def main(top_block_cls=tx_radio, options=None):
     def quitting():
         tb.stop()
         tb.wait()
+
     qapp.aboutToQuit.connect(quitting)
     qapp.exec_()
-
 
 if __name__ == '__main__':
     main()

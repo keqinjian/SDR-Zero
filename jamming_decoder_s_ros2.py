@@ -5,7 +5,7 @@ from rclpy.node import Node
 from std_msgs.msg import String # 导入标准字符串消息类型
 
 UDP_IP = "127.0.0.1"
-UDP_PORT = 14348  # 注意：这里改成了 14348！请确保 GRC 中接收干扰波的 UDP Sink 端口也是这个
+UDP_PORT = 14348  
 
 # 【核心修改 1】：干扰波专属空口密码！
 ACCESS_CODE_HEX = "16E8D377151C712D"
@@ -54,17 +54,15 @@ CRC16_TAB =[
 # ================= ROS2 节点类 =================
 class JammingDecoderNode(Node):
     def __init__(self):
-        super().__init__('jamming_decoder_node') # 节点名称
-        # 创建一个发布者，发布到话题 'radar/jamming_key'
-        # 队列深度为 10
-        self.publisher_ = self.create_publisher(String, 'radar/jamming_key', 10)
+        super().__init__('jamming_decoder_node')
+        self.publisher_ = self.create_publisher(String, 'radio/jamming_key', 10)
         self.get_logger().info('ROS2 密钥发布节点已就绪...')
 
     def publish_key(self, key_str):
         msg = String()
         msg.data = key_str
         self.publisher_.publish(msg)
-        self.get_logger().info(f'已发布破解密钥到 ROS2: "{key_str}"')
+        self.get_logger().info(f'干扰波密钥解析-> "{key_str}"')
 
 
 def calc_crc8(data):
@@ -80,101 +78,103 @@ def calc_crc16(data):
 def bits_to_bytes(bit_string):
     return bytes(int(bit_string[i:i+8], 2) for i in range(0, len(bit_string), 8))
 
-# ================= 业务层：极简单点打击 =================
+# ================= 业务层：修复变量传递 =================
 
-def parse_0x0A06(data):
+def parse_0x0A06(data, ros_node): # 👈 修改 1：添加 ros_node 参数
     """0x0A06 对方干扰波密钥 (6字节)"""
     if len(data) < 6: return
     
-    # 提取前 6 个字节
     raw_key = data[:6]
-    
-    # 【核心防御】：过滤不可见字符，防止干扰乱码弄乱终端显示
     clean_key = "".join([chr(b) for b in raw_key if 32 <= b <= 126]).strip()
-    '''
+    
     if len(clean_key) > 0:
-        print(f"捕获Key ->  {clean_key} ")
-        
-    ''' 
-    if len(clean_key) > 0:
-        # 👇 关键动作：调用 ROS2 发布函数
+        # 👇 修改 2：现在可以正常调用了
         ros_node.publish_key(clean_key)    
 
 # ================= 核心链路层 =================
 
 def main():
+    rclpy.init()
+    ros_node = JammingDecoderNode()
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # 设置非阻塞模式，防止 recvfrom 锁死导致 ROS2 无法响应
+    sock.setblocking(False) 
     sock.bind((UDP_IP, UDP_PORT))
     print(f"干扰波解析器已启动 UDP {UDP_PORT} ...")
     
     bit_buffer = ""
     serial_buffer = bytearray()
     
-    while True:
-        data, _ = sock.recvfrom(8192)
-        bit_buffer += ''.join(str(b) for b in data)
+    try:
+        while rclpy.ok():
+            try:
+                data, _ = sock.recvfrom(8192)
+                bit_buffer += ''.join(str(b) for b in data)
+            except BlockingIOError:
+                # 暂时没收到数据，跳过并处理 ROS 回调
+                pass
 
-        # 第一层：在乱码比特流中抓取 27 字节空口包
-        while len(bit_buffer) >= AIR_FRAME_LEN * 8:
-            idx = bit_buffer.find(ACCESS_CODE_BITS)
-            if idx == -1:
-                bit_buffer = bit_buffer[-63:]
-                break
-            if len(bit_buffer) < idx + (AIR_FRAME_LEN * 8):
-                break 
-            
-            frame_bits = bit_buffer[idx : idx + (AIR_FRAME_LEN * 8)]
-            frame_bytes = bits_to_bytes(frame_bits)
-            
-            # 校验 Header 长度
-            if frame_bytes[8:12] == EXPECTED_HEADER:
-                serial_buffer.extend(frame_bytes[12:27]) # 15字节 Payload
+            # 第一层：抓取空口包
+            while len(bit_buffer) >= AIR_FRAME_LEN * 8:
+                idx = bit_buffer.find(ACCESS_CODE_BITS)
+                if idx == -1:
+                    bit_buffer = bit_buffer[-63:]
+                    break
+                if len(bit_buffer) < idx + (AIR_FRAME_LEN * 8):
+                    break 
                 
-            bit_buffer = bit_buffer[idx + (AIR_FRAME_LEN * 8):]
-            
-        # 第二层：拼接大疆标准串口包，双重防伪过滤
-        while len(serial_buffer) >= 9:
-            sof_idx = serial_buffer.find(0xA5)
-            if sof_idx == -1:
-                serial_buffer.clear()
-                break
-            if sof_idx > 0:
-                serial_buffer = serial_buffer[sof_idx:]
-            if len(serial_buffer) < 5:
-                break
+                frame_bits = bit_buffer[idx : idx + (AIR_FRAME_LEN * 8)]
+                frame_bytes = bits_to_bytes(frame_bits)
                 
-            # [1] 验证帧头 CRC8
-            if calc_crc8(serial_buffer[:4]) != serial_buffer[4]:
-                serial_buffer = serial_buffer[1:]
-                continue
+                if frame_bytes[8:12] == EXPECTED_HEADER:
+                    serial_buffer.extend(frame_bytes[12:27])
+                    
+                bit_buffer = bit_buffer[idx + (AIR_FRAME_LEN * 8):]
                 
-            data_length = struct.unpack('<H', serial_buffer[1:3])[0]
-            expected_frame_len = 5 + 2 + data_length + 2
-            
-            if expected_frame_len > 128: 
-                serial_buffer = serial_buffer[1:]
-                continue
-            if len(serial_buffer) < expected_frame_len:
-                break 
+            # 第二层：拼接串口包
+            while len(serial_buffer) >= 9:
+                sof_idx = serial_buffer.find(0xA5)
+                if sof_idx == -1:
+                    serial_buffer.clear()
+                    break
+                if sof_idx > 0:
+                    serial_buffer = serial_buffer[sof_idx:]
+                if len(serial_buffer) < 5:
+                    break
+                    
+                if calc_crc8(serial_buffer[:4]) != serial_buffer[4]:
+                    serial_buffer = serial_buffer[1:]
+                    continue
+                    
+                data_length = struct.unpack('<H', serial_buffer[1:3])[0]
+                expected_frame_len = 5 + 2 + data_length + 2
                 
-            full_frame = serial_buffer[:expected_frame_len]
-            
-            # [2] 验证整包 CRC16
-            expected_crc16 = struct.unpack('<H', full_frame[-2:])[0]
-            actual_crc16 = calc_crc16(full_frame[:-2])
-            if actual_crc16 != expected_crc16:
-                serial_buffer = serial_buffer[1:]
-                continue
+                if expected_frame_len > 128 or len(serial_buffer) < expected_frame_len:
+                    break 
+                    
+                full_frame = serial_buffer[:expected_frame_len]
+                actual_crc16 = calc_crc16(full_frame[:-2])
+                expected_crc16 = struct.unpack('<H', full_frame[-2:])[0]
                 
-            # [3] 极简路由：只处理 0x0A06，遇到伪装垃圾包 (0xDEAD) 自动丢弃
-            cmd_id = struct.unpack('<H', full_frame[5:7])[0]
-            actual_data = full_frame[7 : 7 + data_length]
-            
-            if cmd_id == 0x0A06: 
-                parse_0x0A06(actual_data)
-            
-            # 从缓冲池中移除已处理完的数据
-            serial_buffer = serial_buffer[expected_frame_len:]
+                if actual_crc16 == expected_crc16:
+                    cmd_id = struct.unpack('<H', full_frame[5:7])[0]
+                    actual_data = full_frame[7 : 7 + data_length]
+                    
+                    if cmd_id == 0x0A06: 
+                        # 👇 修改 3：传入 ros_node 实例
+                        parse_0x0A06(actual_data, ros_node)
+                
+                serial_buffer = serial_buffer[expected_frame_len:]
+
+            # 保持 ROS 活跃，允许处理后台任务
+            rclpy.spin_once(ros_node, timeout_sec=0.01)
+
+    except KeyboardInterrupt:
+        print("\n[INFO] 用户手动终止...")
+    finally:
+        ros_node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
