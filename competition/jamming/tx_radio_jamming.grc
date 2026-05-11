@@ -60,7 +60,7 @@ blocks:
   id: variable
   parameters:
     comment: ''
-    value: '0.6646'
+    value: '2.8323'
   states:
     bus_sink: false
     bus_source: false
@@ -159,7 +159,7 @@ blocks:
     maxoutbuf: '0'
     minoutbuf: '0'
     samples_per_symbol: '52'
-    sensitivity: '0.6646'
+    sensitivity: target_sens
     verbose: 'False'
   states:
     bus_sink: false

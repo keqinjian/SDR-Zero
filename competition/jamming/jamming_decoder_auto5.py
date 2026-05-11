@@ -3,6 +3,7 @@ import struct
 import time
 import xmlrpc.client
 import rclpy
+import datetime # 确保在开头 import 了 datetime
 from rclpy.node import Node
 from std_msgs.msg import String, Int32
 
@@ -11,24 +12,15 @@ UDP_IP = "127.0.0.1"
 UDP_PORT = 14348
 RPC_URL = "http://127.0.0.1:8080" 
 
+RECORD_STREAM = True               # 是否开启录制
+
 ACCESS_CODE_HEX = "16E8D377151C712D"
 ACCESS_CODE_BITS = bin(int(ACCESS_CODE_HEX, 16))[2:].zfill(64)
-# 【弹性匹配机制】搜寻后 48 位 (6字节)，容忍开头 16 位的丢失或乱码
 FUZZY_CODE = ACCESS_CODE_BITS[16:] 
 
-# 备选 1：比特翻转
-ACCESS_CODE_BITS_INV = "".join(['1' if b == '0' else '0' for b in ACCESS_CODE_BITS])
-# 备选 2：LSB序
-def to_lsb_str(hex_str):
-    res = ""
-    for i in range(0, len(hex_str), 2):
-        byte = int(hex_str[i:i+2], 16)
-        res += bin(byte)[2:].zfill(8)[::-1]
-    return res
-ACCESS_CODE_BITS_LSB = to_lsb_str(ACCESS_CODE_HEX)
-
-#EXPECTED_HEADER = bytes([0x0F, 0x00, 0x0F, 0x00])
-EXPECTED_HEADER = bytes([0x00, 0x0F, 0x00, 0x0F])
+# 兼容大小端序头
+EXPECTED_HEADER_LE = bytes([0x0F, 0x00, 0x0F, 0x00])
+EXPECTED_HEADER_BE = bytes([0x00, 0x0F, 0x00, 0x0F])
 AIR_FRAME_LEN = 27
 
 FREQ_MAP = {
@@ -73,6 +65,19 @@ def main():
     rclpy.init()
     node = JammingControllerNode()
 
+    # 生成带时间戳的文件名
+    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    current_record_file = f"jamming_{now}.txt"
+
+    file_recorder = None
+    if RECORD_STREAM:
+        try:
+            # 模式改为 'w' (创建新文件)，不再用 'a'
+            file_recorder = open(current_record_file, 'w')
+            node.get_logger().info(f"录制开启: {current_record_file}")
+        except Exception as e:
+            node.get_logger().error(f"录制文件创建失败: {e}")
+
     try:
         grc_rpc = xmlrpc.client.ServerProxy(RPC_URL)
     except Exception as e:
@@ -90,99 +95,111 @@ def main():
     locked = False
     scan_idx = 0
 
-    while rclpy.ok():
-        current_time = time.time()
+    try:
+        while rclpy.ok():
+            current_time = time.time()
 
-        # ================= 现场调试打印恢复 =================
-        if current_time - last_debug_time > 1.0:
-            if len(bit_buffer) > 128:
-                snippet = bit_buffer[:128]
+            if current_time - last_debug_time > 1.0:
+                if len(bit_buffer) > 128:
+                    snippet = bit_buffer[:128]
+                    try:
+                        hex_snippet = hex(int(snippet, 2))[2:].upper().zfill(32)
+                        print(f"BIN: {snippet[:64]}...")
+                        print(f"HEX: {hex_snippet}")
+                    except Exception as e: 
+                        pass
+                last_debug_time = current_time
+
+            # 扫频逻辑
+            if not locked and (current_time - last_success_time > 3.0):
+                config_list = FREQ_MAP[node.enemy_camp]
+                scan_idx = (scan_idx + 1) % len(config_list)
+                target_f, target_s = config_list[scan_idx]
                 try:
-                    # 转换 hex 时补齐前导 0，避免 0x 开头的被切掉显示不全
-                    hex_snippet = hex(int(snippet, 2))[2:].upper().zfill(32)
-                    print(f"BIN: {snippet[:64]}...")
-                    print(f"HEX: {hex_snippet}")
-                except Exception as e: 
-                    pass
-            last_debug_time = current_time
+                    grc_rpc.set_target_freq(target_f)
+                    grc_rpc.set_target_sens(target_s)
+                    print(f"扫频中: {target_f/1e6} MHz (Sens: {target_s})")
+                except: pass
+                last_success_time = current_time
+                bit_buffer = ""; serial_buffer.clear()
 
-        # 扫频逻辑
-        if not locked and (current_time - last_success_time > 3.0):
-            config_list = FREQ_MAP[node.enemy_camp]
-            scan_idx = (scan_idx + 1) % len(config_list)
-            target_f, target_s = config_list[scan_idx]
             try:
-                grc_rpc.set_target_freq(target_f)
-                grc_rpc.set_target_sens(target_s)
-                print(f"扫频中: {target_f/1e6} MHz (Sens: {target_s})")
-            except: pass
-            last_success_time = current_time
-            bit_buffer = ""; serial_buffer.clear()
-
-        try:
-            data, _ = sock.recvfrom(16384)
-            bit_buffer += ''.join(str(b) for b in data)
-        except BlockingIOError: pass
-
-        # --- 第一层解析：使用后 48 位弹性匹配 ---
-        while len(bit_buffer) >= AIR_FRAME_LEN * 8:
-            idx = bit_buffer.find(FUZZY_CODE)
-            if idx == -1:
-                bit_buffer = bit_buffer[-63:] # 滑动
-                break
-            
-            # 推算整帧起始位置 (往前推 16 位 AccessCode 头部)
-            start_idx = idx - 16
-            if start_idx < 0:
-                bit_buffer = bit_buffer[idx:] # 丢弃开头不全的包
-                continue
-
-            if len(bit_buffer) < start_idx + (AIR_FRAME_LEN * 8):
-                break # 数据还没攒够
-
-            frame_bits = bit_buffer[start_idx : start_idx + (AIR_FRAME_LEN * 8)]
-            frame_bytes = bits_to_bytes(frame_bits)
-            
-            # 只要密码后 48 位对上且 Header 符合 0F 00 0F 00，就认为是有效切片
-            if frame_bytes and frame_bytes[8:12] == EXPECTED_HEADER:
-                serial_buffer.extend(frame_bytes[12:27])
-                bit_buffer = bit_buffer[start_idx + (AIR_FRAME_LEN * 8):]
-            else:
-                # 匹配失败，跳过这个点继续找
-                bit_buffer = bit_buffer[idx+1:]
-        
-        # --- 第二层：串口包拼接与双重校验 ---
-        while len(serial_buffer) >= 9:
-            sof_idx = serial_buffer.find(0xA5)
-            if sof_idx == -1: serial_buffer.clear(); break
-            if sof_idx > 0: serial_buffer = serial_buffer[sof_idx:]
-            if len(serial_buffer) < 5: break
-            
-            # 校验帧头 CRC8 (第一道防线)
-            if calc_crc8(serial_buffer[:4]) != serial_buffer[4]:
-                serial_buffer = serial_buffer[1:]; continue
+                data, _ = sock.recvfrom(16384)
+                incoming_bits = ''.join(str(b) for b in data)
+                bit_buffer += incoming_bits
                 
-            data_len = struct.unpack('<H', serial_buffer[1:3])[0]
-            expected_len = 5 + 2 + data_len + 2
-            if expected_len > 128 or len(serial_buffer) < expected_len: break
-            
-            full_frame = serial_buffer[:expected_len]
-            # 校验整包 CRC16 (第二道防线)
-            if calc_crc16(full_frame[:-2]) == struct.unpack('<H', full_frame[-2:])[0]:
-                last_success_time = time.time(); locked = True
-                cmd_id = struct.unpack('<H', full_frame[5:7])[0]
-                if cmd_id == 0x0A06:
-                    raw_key = full_frame[7 : 7 + data_len]
-                    clean_key = "".join([chr(b) for b in raw_key if 32 <= b <= 126]).strip()
-                    if clean_key: node.publish_key(clean_key)
-            
-            serial_buffer = serial_buffer[expected_len:]
+                if file_recorder:
+                    # 如果你希望极度硬核，可以加个时间戳前缀，
+                    # 但为了方便你赛后直接用脚本搜 AccessCode，建议只加换行
+                    file_recorder.write(incoming_bits + "\n")
+                    # 实时刷新到硬盘，防止程序崩溃导致丢数据
+                    file_recorder.flush() 
+                    
+            except BlockingIOError: pass
 
-        # 锁定态自愈：如果 5 秒没数据则重置
-        if locked and (time.time() - last_success_time > 5.0):
-            locked = False; print("锁定失效，进入扫频...")
+            # --- 第一层解析：使用后 48 位弹性匹配 ---
+            while len(bit_buffer) >= AIR_FRAME_LEN * 8:
+                idx = bit_buffer.find(FUZZY_CODE)
+                if idx == -1:
+                    bit_buffer = bit_buffer[-63:] # 滑动
+                    break
+                
+                start_idx = idx - 16
+                if start_idx < 0:
+                    bit_buffer = bit_buffer[idx:] 
+                    continue
 
-        rclpy.spin_once(node, timeout_sec=0.001)
+                if len(bit_buffer) < start_idx + (AIR_FRAME_LEN * 8):
+                    break 
+
+                frame_bits = bit_buffer[start_idx : start_idx + (AIR_FRAME_LEN * 8)]
+                frame_bytes = bits_to_bytes(frame_bits)
+                
+                if frame_bytes and (frame_bytes[8:12] == EXPECTED_HEADER_LE or frame_bytes[8:12] == EXPECTED_HEADER_BE):
+                    serial_buffer.extend(frame_bytes[12:27])
+                    bit_buffer = bit_buffer[start_idx + (AIR_FRAME_LEN * 8):]
+                else:
+                    bit_buffer = bit_buffer[idx+1:]
+            
+            # --- 第二层：串口包拼接与双重校验 ---
+            while len(serial_buffer) >= 9:
+                sof_idx = serial_buffer.find(0xA5)
+                if sof_idx == -1: serial_buffer.clear(); break
+                if sof_idx > 0: serial_buffer = serial_buffer[sof_idx:]
+                if len(serial_buffer) < 5: break
+                
+                if calc_crc8(serial_buffer[:4]) != serial_buffer[4]:
+                    serial_buffer = serial_buffer[1:]; continue
+                    
+                data_length = struct.unpack('<H', serial_buffer[1:3])[0]
+                expected_len = 5 + 2 + data_length + 2
+                if expected_len > 128 or len(serial_buffer) < expected_len: break
+                
+                full_frame = serial_buffer[:expected_len]
+                if calc_crc16(full_frame[:-2]) == struct.unpack('<H', full_frame[-2:])[0]:
+                    last_success_time = time.time(); locked = True
+                    cmd_id = struct.unpack('<H', full_frame[5:7])[0]
+                    if cmd_id == 0x0A06:
+                        raw_key = full_frame[7 : 7 + data_length]
+                        clean_key = "".join([chr(b) for b in raw_key if 32 <= b <= 126]).strip()
+                        if clean_key: node.publish_key(clean_key)
+                
+                serial_buffer = serial_buffer[expected_len:]
+
+            if locked and (time.time() - last_success_time > 2.0):
+                locked = False; print("锁定失效，进入扫频...")
+
+            rclpy.spin_once(node, timeout_sec=0.001)
+
+    except KeyboardInterrupt:
+        print("\n[INFO] 接收到终止信号...")
+    finally:
+        # 👇 关键动作：程序退出前安全关闭文件，防止数据丢失
+        if file_recorder:
+            file_recorder.close()
+            print(f"💽 录制完成，已保存至 {RECORD_FILE}")
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

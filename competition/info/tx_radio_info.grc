@@ -44,6 +44,18 @@ blocks:
     coordinate: [184, 12]
     rotation: 0
     state: enabled
+- name: target_freq
+  id: variable
+  parameters:
+    comment: ''
+    value: '433920000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [312, 232.0]
+    rotation: 0
+    state: true
 - name: analog_simple_squelch_cc_0
   id: analog_simple_squelch_cc
   parameters:
@@ -158,7 +170,7 @@ blocks:
     filter: ''
     frequency: '433920000'
     samplerate: '1000000'
-    uri: '''ip:192.168.2.1'''
+    uri: '''ip:192.168.3.1'''
   states:
     bus_sink: false
     bus_source: false
@@ -177,7 +189,7 @@ blocks:
     buffer_size: '32768'
     comment: ''
     filter: ''
-    frequency: '433920000'
+    frequency: target_freq
     gain1: '''manual'''
     manual_gain1: '40'
     maxoutbuf: '0'
@@ -185,7 +197,7 @@ blocks:
     quadrature: 'True'
     rfdc: 'True'
     samplerate: '1000000'
-    uri: '''ip:192.168.2.1'''
+    uri: '''ip:192.168.3.1'''
   states:
     bus_sink: false
     bus_source: false
@@ -271,6 +283,20 @@ blocks:
     bus_source: false
     bus_structure: null
     coordinate: [1118, 42]
+    rotation: 0
+    state: true
+- name: xmlrpc_server_0
+  id: xmlrpc_server
+  parameters:
+    addr: localhost
+    alias: ''
+    comment: ''
+    port: '8081'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [304, 128.0]
     rotation: 0
     state: true
 

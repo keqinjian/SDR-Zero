@@ -61,7 +61,7 @@ class RefereeTransmitter:
         
         # 官方空口常量
         self.ACCESS_CODE = bytes([0x2F, 0x6F, 0x4C, 0x74, 0xB9, 0x14, 0x49, 0x2E])
-        self.HEADER = bytes([0x0F, 0x00, 0x0F, 0x00])
+        self.HEADER = bytes([0x00, 0x0F, 0x00, 0x0F])
 
     def build_rm_frame(self, cmd_id, data):
         """生成一个大疆标准的串口帧"""
@@ -100,7 +100,7 @@ class RefereeTransmitter:
         data = struct.pack('<12h', 
                            250, 310,  # 英雄 (2.5m, 3.1m)
                            120, 50,   # 工程
-                           -50, 100,  # 步兵3
+                           50, 100,  # 步兵3
                            120, 0,      # 步兵4
                            1000, 500, # 空中
                            0, 400)      # 哨兵

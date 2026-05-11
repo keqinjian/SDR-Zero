@@ -1,0 +1,32 @@
+坐标信息
+    话题名称：/radio/info/position
+    JSON 结构：{"hero": {"x": 1.2, "y": 3.5}, "inf3": {...}, ...}
+    单位说明：
+        坐标系：官方世界坐标系（以红方补给站角落为原点）。
+        单位：米 (m)。已自动完成 cm 到 m 的转换。
+    包含兵种：英雄 (hero)、工程 (eng)、步兵3/4 (inf3/inf4)、空中 (aerial)、哨兵 (sentry)。
+
+血量监控
+    话题名称：/radio/info/hp
+    JSON 结构：{"hero": 1500, "eng": 500, "inf3": 240, ...}
+
+增益/状态
+    话题名称：/radio/info/buff
+    JSON结构：{"units": {"hero": {"recovery": 10, "cooling": 100, "defense": 20, "vulnerability": 0, "attack": 150}, "eng": {"recovery": 0, "c...
+    核心字段：
+        units: 包含每台机器人的 recovery (回血%)、cooling (冷却增益)、defense (防御%)、vulnerability (易伤%)、attack (攻击%)。
+        sentry_posture: 哨兵当前姿态（1:进攻, 2:防御, 3:移动）。
+
+    战术价值：易伤 (vulnerability) 字段非零时是全队集火的最佳时机。
+
+宏观战场
+    话题名称：/radio/info/macro
+    JSON 结构：{"coin": 350, "total_coin": 1200, "base_shield": true, ...}
+
+    包含信息：对方剩余金币、总金币、基地护盾状态、场地增益点占领位图。
+
+弹药数据
+    话题名称：/radio/info/ammo
+    JSON 结构：{"hero": 150, "inf3": 400, ...}
+
+    战术价值：判断敌方是否有子弹，决定是否可以强行“骗炮”或冲锋。
