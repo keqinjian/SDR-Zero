@@ -197,9 +197,10 @@ def main():
         # 👇 关键动作：程序退出前安全关闭文件，防止数据丢失
         if file_recorder:
             file_recorder.close()
-            print(f"💽 录制完成，已保存至 {RECORD_FILE}")
+            print(f"录制完成，已保存至 {RECORD_FILE}")
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
