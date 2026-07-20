@@ -26,6 +26,17 @@ competition/jamming_mock/mock_tx.py
   换干扰等级时：必须改 tx_radio.py 里的 target_freq + target_sens 后【重启】GRC。
   gfsk_mod 运行时改 Sens 无效；本脚本 XMLRPC 只能帮你改频点。
   一级 Sens=2.8194，二级 2.5681，三级 0.6517（规则 V2 表 5-23）。
+
+---------------------------------------------------------------------------
+【本机双板交叉测试约定】
+---------------------------------------------------------------------------
+  SDR-A 192.168.2.1 = 平时 jamming RX（8080）
+  SDR-B 192.168.3.1 = 平时 info    RX（8081）
+
+  测干扰波收发：
+    TX = SDR-B（本目录 tx_radio.py，URI 已写 192.168.3.1，XMLRPC 8083，UDP 12347）
+    RX = SDR-A（competition/jamming/tx_radio.py + jamming_decoder_f2.py）
+    勿同时开 info RX（B 被 TX 占用）
 """
 
 from __future__ import annotations

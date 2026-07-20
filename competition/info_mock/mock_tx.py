@@ -31,17 +31,20 @@ competition/info_mock/mock_tx.py
   本脚本：往 12345 喂「空口整包字节」，必须经 GFSK 调制上天线，测真一发一收。
 
 ---------------------------------------------------------------------------
-【一发一收怎么跑】
+【本机双板交叉测试约定】
 ---------------------------------------------------------------------------
-  发射机：
-    1. 改 tx_radio.py 的 pluto_uri（TX 那台，默认示例 192.168.3.2）
-    2. python3 competition/info_mock/tx_radio.py
-    3. python3 competition/info_mock/mock_tx.py --camp RED
+  SDR-A 192.168.2.1 = 平时 jamming RX（8080）
+  SDR-B 192.168.3.1 = 平时 info    RX（8081）
 
-  接收机（另一台 Pluto）：
-    1. competition/info/tx_radio.py 的 URI 指向 RX Pluto
-    2. decoder /team 或 MY_CAMP 与 --camp 一致（听己方基座广播频）
-    3. python3 competition/info/info_decoder_f1.py
+  测信息波收发：
+    TX = SDR-A（本目录 tx_radio.py，URI 已写 192.168.2.1，XMLRPC 8082，UDP 12345）
+    RX = SDR-B（competition/info/tx_radio.py + info_decoder_f1.py）
+    勿同时开 jamming RX（A 被 TX 占用）
+
+  步骤：
+    1. python3 competition/info_mock/tx_radio.py
+    2. python3 competition/info_mock/mock_tx.py --camp RED
+    3. 另开：competition/info/tx_radio.py + info_decoder_f1.py（听同一阵营）
 """
 
 from __future__ import annotations

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+#
+# 干扰波【接收端】GRC —— 正常双收时绑定 SDR-A
+#   Pluto URI : ip:192.168.2.1
+#   XMLRPC    : localhost:8080
+#   UDP Sink  : 127.0.0.1:14348 → jamming_decoder_f2.py
+#
+# 交叉测干扰波 TX 时：本脚本继续用 SDR-A 收；
+#   发射端用 competition/jamming_mock（占用 SDR-B 192.168.3.1 / RPC 8083 / UDP 12347）
 #
 # SPDX-License-Identifier: GPL-3.0
-#
-# GNU Radio Python Flow Graph
-# Title: Not titled yet
-# Author: keqinjian
 # GNU Radio version: v3.8.5.0-6-g57bd109d
 
 from distutils.version import StrictVersion

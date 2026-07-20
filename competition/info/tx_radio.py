@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+#
+# 信息波【接收端】GRC —— 正常双收时绑定 SDR-B
+#   Pluto URI : ip:192.168.3.1
+#   XMLRPC    : localhost:8081
+#   UDP Sink  : 127.0.0.1:14346 → info_decoder_f1.py
+#
+# 交叉测信息波 TX 时：本脚本继续用 SDR-B 收；
+#   发射端用 competition/info_mock（占用 SDR-A 192.168.2.1 / RPC 8082 / UDP 12345）
 #
 # SPDX-License-Identifier: GPL-3.0
-#
-# GNU Radio Python Flow Graph
-# Title: Not titled yet
-# Author: keqinjian
 # GNU Radio version: v3.8.5.0-6-g57bd109d
 
 from distutils.version import StrictVersion

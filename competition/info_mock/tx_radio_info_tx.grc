@@ -3,7 +3,7 @@ options:
     author: SDR-Zero
     category: '[GRC Hier Blocks]'
     cmake_opt: ''
-    comment: 'Info-wave TX mock V2 | UDP:12345 XMLRPC:8082'
+    comment: 'Info TX mock | Pluto=SDR-A 192.168.2.1 | UDP:12345 XMLRPC:8082'
     copyright: ''
     description: 'UDP -> GFSK Mod SPS=47 -> Pluto Sink'
     gen_cmake: 'On'
@@ -135,7 +135,7 @@ blocks:
     filter: ''
     frequency: target_freq
     samplerate: '1000000'
-    uri: '''ip:192.168.3.2'''
+    uri: '''ip:192.168.2.1'''
   states:
     bus_sink: false
     bus_source: false
