@@ -3,7 +3,7 @@ options:
     author: keqinjian
     category: '[GRC Hier Blocks]'
     cmake_opt: ''
-    comment: ''
+    comment: '干扰波 RX | Pluto URI 在 iio_pluto_source_0 = ip:192.168.2.1 (SDR-A) | UDP 14348 | XMLRPC 8080'
     copyright: ''
     description: ''
     gen_cmake: 'On'
@@ -177,7 +177,7 @@ blocks:
     auto_filter: 'True'
     bandwidth: '250000'
     buffer_size: '32768'
-    comment: ''
+    comment: '【已禁用】旧 TX Sink，勿启用；URI 仅占位'
     cyclic: 'False'
     filter: ''
     frequency: target_freq
@@ -199,7 +199,7 @@ blocks:
     bandwidth: '1000000'
     bbdc: 'True'
     buffer_size: '32768'
-    comment: ''
+    comment: '★★★ 改 RX Pluto IP 看这里 uri ★★★ 干扰波 SDR-A = 192.168.2.1（与 tx_radio.py 的 pluto_uri 一致）'
     filter: ''
     frequency: target_freq
     gain1: '''manual'''

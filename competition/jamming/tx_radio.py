@@ -79,11 +79,15 @@ class tx_radio(gr.top_block, Qt.QWidget):
             pass
 
         ##################################################
-        # Variables
+        # Variables —— 现场常改看这里
         # 对齐规则 V2.1.0：SPS=47；一级干扰 Sens 初值 2.8194
         # 纯 RX：已移除 Pluto Sink / GFSK Mod / UDP Source
         # 二级/三级 Sens 由 decoder XMLRPC set_target_sens 切换
         ##################################################
+        # ★★★ RX Pluto URI（干扰波接收机 = SDR-A）★★★
+        # 改 IP 只改这一行；下面 iio.pluto_source 会引用它。
+        # 正常双收：SDR-A = 192.168.2.1；交叉测信息 TX 时本板会被 info_mock 占用，勿同时开本脚本。
+        self.pluto_uri = pluto_uri = 'ip:192.168.2.1'
         self.target_sens = target_sens = 2.8194
         self.target_freq = target_freq = 432200000  # 默认红方一级；decoder 会扫频覆盖
         self.rx_gain = rx_gain = 40
@@ -92,6 +96,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
         ##################################################
         # Blocks
         ##################################################
+        # XMLRPC 端口 8080（与 jamming_decoder_f2.RPC_URL 一致）
         self.xmlrpc_server_0 = SimpleXMLRPCServer(('localhost', 8080), allow_none=True)
         self.xmlrpc_server_0.register_instance(self)
         self.xmlrpc_server_0_thread = threading.Thread(target=self.xmlrpc_server_0.serve_forever)
@@ -137,9 +142,10 @@ class tx_radio(gr.top_block, Qt.QWidget):
 
         self._qtgui_freq_sink_x_0_win = sip.wrapinstance(self.qtgui_freq_sink_x_0.pyqwidget(), Qt.QWidget)
         self.top_layout.addWidget(self._qtgui_freq_sink_x_0_win)
-        # URI 按现场干扰波 Pluto IP 改
+        # Pluto Source：URI = 上面 Variables 里的 pluto_uri（SDR-A）
+        # 增益 / LO 由 rx_gain、target_freq 与 XMLRPC 控制；URI 运行时改不了，需改变量后重启
         self.iio_pluto_source_0 = iio.pluto_source(
-            'ip:192.168.2.1', target_freq, 1000000, 1000000, 32768,
+            pluto_uri, target_freq, 1000000, 1000000, 32768,
             True, True, True, 'manual', rx_gain, '', True)
         self.digital_gfsk_demod_0 = digital.gfsk_demod(
             samples_per_symbol=47,   # 新规则 SPS
@@ -150,6 +156,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
             freq_error=0.0048,
             verbose=False,
             log=False)
+        # 解调 bit 流 → decoder：UDP 14348
         self.blocks_udp_sink_0 = blocks.udp_sink(gr.sizeof_char*1, '127.0.0.1', 14348, 1472, True)
 
 

@@ -80,10 +80,14 @@ class tx_radio(gr.top_block, Qt.QWidget):
             pass
 
         ##################################################
-        # Variables
+        # Variables —— 现场常改看这里
         # 对齐规则 V2.1.0：SPS=47，广播源 Sensitivity=1.5628
         # 纯 RX：已移除 Pluto Sink / GFSK Mod / UDP Source
         ##################################################
+        # ★★★ RX Pluto URI（信息波接收机 = SDR-B）★★★
+        # 改 IP 只改这一行；下面 iio.pluto_source 会引用它。
+        # 正常双收：SDR-B = 192.168.3.1；交叉测干扰 TX 时本板会被 jamming_mock 占用，勿同时开本脚本。
+        self.pluto_uri = pluto_uri = 'ip:192.168.3.1'
         self.target_sens = target_sens = 1.5628
         self.target_freq = target_freq = 433200000  # 默认红方广播；decoder 会 RPC 覆盖
         self.rx_gain = rx_gain = 40                 # 信息波 -60 dBm，增益需够
@@ -92,6 +96,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
         ##################################################
         # Blocks
         ##################################################
+        # XMLRPC 端口 8081（与 info_decoder_f1.RPC_URL 一致）
         self.xmlrpc_server_0 = SimpleXMLRPCServer(('localhost', 8081), allow_none=True)
         self.xmlrpc_server_0.register_instance(self)
         self.xmlrpc_server_0_thread = threading.Thread(target=self.xmlrpc_server_0.serve_forever)
@@ -146,9 +151,10 @@ class tx_radio(gr.top_block, Qt.QWidget):
                 50e3,
                 firdes.WIN_HAMMING,
                 6.76))
-        # URI 按现场信息波 Pluto IP 改；增益 / LO 由变量与 XMLRPC 控制
+        # Pluto Source：URI = 上面 Variables 里的 pluto_uri（SDR-B）
+        # 增益 / LO 由 rx_gain、target_freq 与 XMLRPC 控制；URI 运行时改不了，需改变量后重启
         self.iio_pluto_source_0 = iio.pluto_source(
-            'ip:192.168.3.1', target_freq, 1000000, 1000000, 32768,
+            pluto_uri, target_freq, 1000000, 1000000, 32768,
             True, True, True, 'manual', rx_gain, '', True)
         self.digital_gfsk_demod_0 = digital.gfsk_demod(
             samples_per_symbol=47,   # 新规则 SPS
@@ -159,6 +165,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
             freq_error=0.0048,
             verbose=False,
             log=False)
+        # 解调 bit 流 → decoder：UDP 14346
         self.blocks_udp_sink_0 = blocks.udp_sink(gr.sizeof_char*1, '127.0.0.1', 14346, 1472, True)
 
 
