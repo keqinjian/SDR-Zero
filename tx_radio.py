@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 【注意】仓库根目录这份 tx_radio.py 是旧残留，比赛请用：
+#   competition/info/tx_radio.py      （信息波，UDP 14346 / RPC 8081）
+#   competition/jamming/tx_radio.py   （干扰波，UDP 14348 / RPC 8080）
 
 #
 # SPDX-License-Identifier: GPL-3.0

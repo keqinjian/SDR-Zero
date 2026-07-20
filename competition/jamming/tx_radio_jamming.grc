@@ -48,7 +48,7 @@ blocks:
   id: variable
   parameters:
     comment: ''
-    value: '434920000'
+    value: '432200000'
   states:
     bus_sink: false
     bus_source: false
@@ -59,8 +59,8 @@ blocks:
 - name: target_sens
   id: variable
   parameters:
-    comment: ''
-    value: '2.8323'
+    comment: 'V2 jam L1 Sensitivity'
+    value: '2.8194'
   states:
     bus_sink: false
     bus_source: false
@@ -82,9 +82,9 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [935, 398]
+    coordinate: [888, 412.0]
     rotation: 0
-    state: enabled
+    state: disabled
 - name: blocks_udp_sink_0
   id: blocks_udp_sink
   parameters:
@@ -124,21 +124,21 @@ blocks:
     bus_structure: null
     coordinate: [496, 92]
     rotation: 0
-    state: enabled
+    state: disabled
 - name: digital_gfsk_demod_0
   id: digital_gfsk_demod
   parameters:
     affinity: ''
     alias: ''
     comment: ''
-    freq_error: '0.0'
-    gain_mu: '0.3'
+    freq_error: '0.0048'
+    gain_mu: '0.175'
     log: 'False'
     maxoutbuf: '0'
     minoutbuf: '0'
     mu: '0.5'
     omega_relative_limit: '0.005'
-    samples_per_symbol: '52'
+    samples_per_symbol: '47'
     sensitivity: target_sens
     verbose: 'False'
   states:
@@ -158,7 +158,7 @@ blocks:
     log: 'False'
     maxoutbuf: '0'
     minoutbuf: '0'
-    samples_per_symbol: '52'
+    samples_per_symbol: '47'
     sensitivity: target_sens
     verbose: 'False'
   states:
@@ -167,7 +167,7 @@ blocks:
     bus_structure: null
     coordinate: [501, 212]
     rotation: 0
-    state: enabled
+    state: disabled
 - name: iio_pluto_sink_0
   id: iio_pluto_sink
   parameters:
@@ -189,7 +189,7 @@ blocks:
     bus_structure: null
     coordinate: [726, 133]
     rotation: 0
-    state: enabled
+    state: disabled
 - name: iio_pluto_source_0
   id: iio_pluto_source
   parameters:
@@ -203,7 +203,7 @@ blocks:
     filter: ''
     frequency: target_freq
     gain1: '''manual'''
-    manual_gain1: '20'
+    manual_gain1: '40'
     maxoutbuf: '0'
     minoutbuf: '0'
     quadrature: 'True'
@@ -313,11 +313,8 @@ blocks:
     state: true
 
 connections:
-- [analog_simple_squelch_cc_0, '0', digital_gfsk_demod_0, '0']
-- [blocks_udp_source_0, '0', digital_gfsk_mod_0, '0']
 - [digital_gfsk_demod_0, '0', blocks_udp_sink_0, '0']
-- [digital_gfsk_mod_0, '0', iio_pluto_sink_0, '0']
-- [iio_pluto_source_0, '0', analog_simple_squelch_cc_0, '0']
+- [iio_pluto_source_0, '0', digital_gfsk_demod_0, '0']
 - [iio_pluto_source_0, '0', qtgui_freq_sink_x_0, '0']
 
 metadata:

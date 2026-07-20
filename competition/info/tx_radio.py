@@ -78,8 +78,12 @@ class tx_radio(gr.top_block, Qt.QWidget):
 
         ##################################################
         # Variables
+        # 对齐规则 V2.1.0：SPS=47，广播源 Sensitivity=1.5628
+        # 纯 RX：已移除 Pluto Sink / GFSK Mod / UDP Source
         ##################################################
-        self.target_freq = target_freq = 433920000
+        self.target_sens = target_sens = 1.5628
+        self.target_freq = target_freq = 433200000  # 默认红方广播；decoder 会 RPC 覆盖
+        self.rx_gain = rx_gain = 40                 # 信息波 -60 dBm，增益需够
         self.samp_rate = samp_rate = 1000000
 
         ##################################################
@@ -95,7 +99,7 @@ class tx_radio(gr.top_block, Qt.QWidget):
             firdes.WIN_BLACKMAN_hARRIS, #wintype
             0, #fc
             samp_rate, #bw
-            "info_flitered", #name
+            "info_filtered", #name
             1
         )
         self.qtgui_freq_sink_x_0.set_update_time(0.10)
@@ -139,33 +143,28 @@ class tx_radio(gr.top_block, Qt.QWidget):
                 50e3,
                 firdes.WIN_HAMMING,
                 6.76))
-        self.iio_pluto_source_0 = iio.pluto_source('ip:192.168.3.1', target_freq, 1000000, 1000000, 32768, True, True, True, 'manual', 27, '', True)
-        self.iio_pluto_sink_0 = iio.pluto_sink('ip:192.168.3.1', 433920000, 1000000, 20000000, 32768, False, 50, '', True)
-        self.digital_gfsk_mod_0 = digital.gfsk_mod(
-            samples_per_symbol=52,
-            sensitivity=1.5756,
-            bt=0.35,
-            verbose=False,
-            log=False)
+        # URI 按现场信息波 Pluto IP 改；增益 / LO 由变量与 XMLRPC 控制
+        self.iio_pluto_source_0 = iio.pluto_source(
+            'ip:192.168.3.1', target_freq, 1000000, 1000000, 32768,
+            True, True, True, 'manual', rx_gain, '', True)
         self.digital_gfsk_demod_0 = digital.gfsk_demod(
-            samples_per_symbol=52,
-            sensitivity=1.5756,
-            gain_mu=0.3,
+            samples_per_symbol=47,   # 新规则 SPS
+            sensitivity=target_sens, # 1.5628
+            gain_mu=0.175,           # 弱信号放软时钟环
             mu=0.5,
             omega_relative_limit=0.005,
-            freq_error=0.0,
+            freq_error=0.0048,
             verbose=False,
             log=False)
-        self.blocks_udp_source_0 = blocks.udp_source(gr.sizeof_char*1, '127.0.0.1', 12345, 1472, True)
         self.blocks_udp_sink_0 = blocks.udp_sink(gr.sizeof_char*1, '127.0.0.1', 14346, 1472, True)
 
 
         ##################################################
-        # Connections
+        # Connections（纯 RX）
+        # Source → LPF → GFSK Demod → UDP:14346
+        #              ↘ Frequency Sink
         ##################################################
-        self.connect((self.blocks_udp_source_0, 0), (self.digital_gfsk_mod_0, 0))
         self.connect((self.digital_gfsk_demod_0, 0), (self.blocks_udp_sink_0, 0))
-        self.connect((self.digital_gfsk_mod_0, 0), (self.iio_pluto_sink_0, 0))
         self.connect((self.iio_pluto_source_0, 0), (self.low_pass_filter_0, 0))
         self.connect((self.low_pass_filter_0, 0), (self.digital_gfsk_demod_0, 0))
         self.connect((self.low_pass_filter_0, 0), (self.qtgui_freq_sink_x_0, 0))
@@ -176,12 +175,43 @@ class tx_radio(gr.top_block, Qt.QWidget):
         self.settings.setValue("geometry", self.saveGeometry())
         event.accept()
 
+    def _apply_demod_sensitivity(self, sensitivity):
+        """
+        GR 3.8.5：gfsk_demod 构造用 quadrature_demod_cf(1.0 / sensitivity)，
+        运行时 set_gain 同步写 1/sens。信息波红蓝 Sens 同为 1.5628，切阵营几乎无感。
+        """
+        demod = self.digital_gfsk_demod_0
+        sens = float(sensitivity)
+        if sens == 0.0:
+            return
+        gain = 1.0 / sens
+        if hasattr(demod, 'fmdemod'):
+            demod.fmdemod.set_gain(gain)
+        elif hasattr(demod, 'set_sensitivity'):
+            demod.set_sensitivity(sens)
+
+    def get_target_sens(self):
+        return self.target_sens
+
+    def set_target_sens(self, target_sens):
+        self.target_sens = float(target_sens)
+        self._apply_demod_sensitivity(self.target_sens)
+
     def get_target_freq(self):
         return self.target_freq
 
     def set_target_freq(self, target_freq):
         self.target_freq = target_freq
-        self.iio_pluto_source_0.set_params(self.target_freq, 1000000, 1000000, True, True, True, 'manual', 27, '', True)
+        self.iio_pluto_source_0.set_params(
+            self.target_freq, 1000000, 1000000, True, True, True,
+            'manual', self.rx_gain, '', True)
+
+    def get_rx_gain(self):
+        return self.rx_gain
+
+    def set_rx_gain(self, rx_gain):
+        self.rx_gain = rx_gain
+        self.set_target_freq(self.target_freq)
 
     def get_samp_rate(self):
         return self.samp_rate

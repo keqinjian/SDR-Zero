@@ -1,13 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+competition/info_mock/tx_radio.py
+=================================
+信息波【发射端】GNU Radio 流程图（规则手册 V2.1.0 / 协议 V2.0.0）
 
-#
-# SPDX-License-Identifier: GPL-3.0
-#
-# GNU Radio Python Flow Graph
-# Title: Not titled yet
-# Author: keqinjian
-# GNU Radio version: v3.8.5.0-6-g57bd109d
+---------------------------------------------------------------------------
+【小白总览】本脚本只做「射频调制上天线」，不组裁判帧
+---------------------------------------------------------------------------
+
+  mock_tx.py  →  UDP:12345（27 字节空口包：Access+Header+15B）
+       ▼
+  本文件：UDP Source → GFSK Mod → PlutoSDR Sink
+       ▼
+  另一台 Pluto RX：competition/info/tx_radio.py + info_decoder_f1.py
+
+---------------------------------------------------------------------------
+【现场必改三项】
+---------------------------------------------------------------------------
+  1. pluto_uri   —— 发射机 Pluto，必须与 RX 那台 IP 不同
+  2. target_freq —— 红 433200000 / 蓝 433920000（也可用 mock_tx --camp 经 RPC 改）
+  3. tx_atten    —— 衰减 dB，越大越弱；信息波官方约 -60 dBm，近场可先 30～50
+
+---------------------------------------------------------------------------
+【端口与 RPC】
+---------------------------------------------------------------------------
+  UDP Source：127.0.0.1:12345
+  XMLRPC：localhost:8082（set_target_freq / set_tx_atten 有效；
+          set_target_sens 只改变量，gfsk_mod 需重启才生效——信息波一般不用换 Sens）
+
+---------------------------------------------------------------------------
+【物理层参数（V2）】
+---------------------------------------------------------------------------
+  SPS=47，Sensitivity=1.5628，BT=0.35，samp_rate=1e6
+"""
 
 from distutils.version import StrictVersion
 
@@ -18,7 +44,7 @@ if __name__ == '__main__':
         try:
             x11 = ctypes.cdll.LoadLibrary('libX11.so')
             x11.XInitThreads()
-        except:
+        except Exception:
             print("Warning: failed to XInitThreads()")
 
 from PyQt5 import Qt
@@ -30,9 +56,6 @@ from gnuradio import digital
 from gnuradio import gr
 import sys
 import signal
-from argparse import ArgumentParser
-from gnuradio.eng_arg import eng_float, intx
-from gnuradio import eng_notation
 import iio
 try:
     from xmlrpc.server import SimpleXMLRPCServer
@@ -42,16 +65,17 @@ import threading
 
 from gnuradio import qtgui
 
+
 class tx_radio(gr.top_block, Qt.QWidget):
 
     def __init__(self):
-        gr.top_block.__init__(self, "Not titled yet")
+        gr.top_block.__init__(self, "info_mock_tx")
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("Not titled yet")
+        self.setWindowTitle("info_mock TX (V2)")
         qtgui.util.check_set_qss()
         try:
             self.setWindowIcon(Qt.QIcon.fromTheme('gnuradio-grc'))
-        except:
+        except Exception:
             pass
         self.top_scroll_layout = Qt.QVBoxLayout()
         self.setLayout(self.top_scroll_layout)
@@ -65,43 +89,39 @@ class tx_radio(gr.top_block, Qt.QWidget):
         self.top_grid_layout = Qt.QGridLayout()
         self.top_layout.addLayout(self.top_grid_layout)
 
-        self.settings = Qt.QSettings("GNU Radio", "tx_radio")
-
+        self.settings = Qt.QSettings("GNU Radio", "info_mock_tx")
         try:
             if StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):
                 self.restoreGeometry(self.settings.value("geometry").toByteArray())
             else:
                 self.restoreGeometry(self.settings.value("geometry"))
-        except:
+        except Exception:
             pass
 
         ##################################################
-        # Variables
-        # 对齐规则 V2.1.0：SPS=47；一级干扰 Sens 初值 2.8194
-        # 纯 RX：已移除 Pluto Sink / GFSK Mod / UDP Source
-        # 二级/三级 Sens 由 decoder XMLRPC set_target_sens 切换
+        # Variables —— 现场常改：URI / 频点 / 衰减
         ##################################################
-        self.target_sens = target_sens = 2.8194
-        self.target_freq = target_freq = 432200000  # 默认红方一级；decoder 会扫频覆盖
-        self.rx_gain = rx_gain = 40
+        # 【改成你的「发射」Pluto IP，勿与 RX 那台相同】
+        #   RX 默认常见：ip:192.168.3.1  →  本 TX 示例用 .2，避免抢同一块板
+        self.pluto_uri = pluto_uri = 'ip:192.168.3.2'
+        # 信息波 Sens 固定 1.5628（规则表 5-23）；换阵营只换频，不换 Sens
+        self.target_sens = target_sens = 1.5628
+        self.target_freq = target_freq = 433200000   # 默认红方；蓝方 433920000
+        self.tx_atten = tx_atten = 40.0              # dB，越大越弱（信息波官方约 -60 dBm）
         self.samp_rate = samp_rate = 1000000
 
         ##################################################
         # Blocks
         ##################################################
-        self.xmlrpc_server_0 = SimpleXMLRPCServer(('localhost', 8080), allow_none=True)
+        # XMLRPC 供 mock_tx.py --camp 热切换频点（不重启 GRC）
+        self.xmlrpc_server_0 = SimpleXMLRPCServer(('localhost', 8082), allow_none=True)
         self.xmlrpc_server_0.register_instance(self)
         self.xmlrpc_server_0_thread = threading.Thread(target=self.xmlrpc_server_0.serve_forever)
         self.xmlrpc_server_0_thread.daemon = True
         self.xmlrpc_server_0_thread.start()
+
         self.qtgui_freq_sink_x_0 = qtgui.freq_sink_c(
-            1024, #size
-            firdes.WIN_BLACKMAN_hARRIS, #wintype
-            0, #fc
-            samp_rate, #bw
-            "jamming_rx", #name
-            1
-        )
+            1024, firdes.WIN_BLACKMAN_hARRIS, 0, samp_rate, "info_tx", 1)
         self.qtgui_freq_sink_x_0.set_update_time(0.10)
         self.qtgui_freq_sink_x_0.set_y_axis(-140, 10)
         self.qtgui_freq_sink_x_0.set_y_label('Relative Gain', 'dB')
@@ -111,101 +131,61 @@ class tx_radio(gr.top_block, Qt.QWidget):
         self.qtgui_freq_sink_x_0.set_fft_average(1.0)
         self.qtgui_freq_sink_x_0.enable_axis_labels(True)
         self.qtgui_freq_sink_x_0.enable_control_panel(False)
-
-
-
-        labels = ['', '', '', '', '',
-            '', '', '', '', '']
-        widths = [1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1]
-        colors = ["blue", "red", "green", "black", "cyan",
-            "magenta", "yellow", "dark red", "dark green", "dark blue"]
-        alphas = [1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0]
-
         for i in range(1):
-            if len(labels[i]) == 0:
-                self.qtgui_freq_sink_x_0.set_line_label(i, "Data {0}".format(i))
-            else:
-                self.qtgui_freq_sink_x_0.set_line_label(i, labels[i])
-            self.qtgui_freq_sink_x_0.set_line_width(i, widths[i])
-            self.qtgui_freq_sink_x_0.set_line_color(i, colors[i])
-            self.qtgui_freq_sink_x_0.set_line_alpha(i, alphas[i])
-
+            self.qtgui_freq_sink_x_0.set_line_label(i, "TX")
+            self.qtgui_freq_sink_x_0.set_line_width(i, 1)
+            self.qtgui_freq_sink_x_0.set_line_color(i, "blue")
+            self.qtgui_freq_sink_x_0.set_line_alpha(i, 1.0)
         self._qtgui_freq_sink_x_0_win = sip.wrapinstance(self.qtgui_freq_sink_x_0.pyqwidget(), Qt.QWidget)
         self.top_layout.addWidget(self._qtgui_freq_sink_x_0_win)
-        # URI 按现场干扰波 Pluto IP 改
-        self.iio_pluto_source_0 = iio.pluto_source(
-            'ip:192.168.2.1', target_freq, 1000000, 1000000, 32768,
-            True, True, True, 'manual', rx_gain, '', True)
-        self.digital_gfsk_demod_0 = digital.gfsk_demod(
-            samples_per_symbol=47,   # 新规则 SPS
-            sensitivity=target_sens, # 默认一级 2.8194
-            gain_mu=0.175,
-            mu=0.5,
-            omega_relative_limit=0.005,
-            freq_error=0.0048,
+
+        # UDP：收 mock_tx 打来的「字节流」（每个空口包 27B，可粘包/分包，按字节流喂调制器）
+        self.blocks_udp_source_0 = blocks.udp_source(
+            gr.sizeof_char * 1, '127.0.0.1', 12345, 1472, True)
+        # GFSK 调制：SPS/Sens 在构造时定死；运行时 set_target_sens 无效
+        self.digital_gfsk_mod_0 = digital.gfsk_mod(
+            samples_per_symbol=47,
+            sensitivity=target_sens,
+            bt=0.35,
             verbose=False,
             log=False)
-        self.blocks_udp_sink_0 = blocks.udp_sink(gr.sizeof_char*1, '127.0.0.1', 14348, 1472, True)
-
+        # Pluto Sink：attenuation 越大发射越弱；带宽/采样 1e6 与 RX 一致
+        self.iio_pluto_sink_0 = iio.pluto_sink(
+            pluto_uri, target_freq, 1000000, 1000000, 32768,
+            False, tx_atten, '', True)
 
         ##################################################
-        # Connections（纯 RX）
-        # Source → GFSK Demod → UDP:14348
-        #       ↘ Frequency Sink
+        # Connections：字节 → 调制 IQ → 天线上空 + 频谱监视
         ##################################################
-        self.connect((self.digital_gfsk_demod_0, 0), (self.blocks_udp_sink_0, 0))
-        self.connect((self.iio_pluto_source_0, 0), (self.digital_gfsk_demod_0, 0))
-        self.connect((self.iio_pluto_source_0, 0), (self.qtgui_freq_sink_x_0, 0))
-
+        self.connect((self.blocks_udp_source_0, 0), (self.digital_gfsk_mod_0, 0))
+        self.connect((self.digital_gfsk_mod_0, 0), (self.iio_pluto_sink_0, 0))
+        self.connect((self.digital_gfsk_mod_0, 0), (self.qtgui_freq_sink_x_0, 0))
 
     def closeEvent(self, event):
-        self.settings = Qt.QSettings("GNU Radio", "tx_radio")
+        self.settings = Qt.QSettings("GNU Radio", "info_mock_tx")
         self.settings.setValue("geometry", self.saveGeometry())
         event.accept()
-
-    def _apply_demod_sensitivity(self, sensitivity):
-        """
-        GR 3.8.5 源码：gfsk_demod 构造时
-            self.fmdemod = analog.quadrature_demod_cf(1.0 / sensitivity)
-        因此运行时 set_gain 必须写 1/sens，才能和构造时一致。
-
-        注意：旧版 GRC 生成的 set_target_sens 只改 Python 变量、不改解调器
-        （等于空操作）。f1 能解三级，靠的是 set_target_freq 切频，不是 Sens RPC。
-        本函数是在「真正让 Sens 表生效」；若现场只靠切频也够用，不调用也无妨。
-        """
-        demod = self.digital_gfsk_demod_0
-        sens = float(sensitivity)
-        if sens == 0.0:
-            return
-        gain = 1.0 / sens
-        if hasattr(demod, 'fmdemod'):
-            demod.fmdemod.set_gain(gain)
-        elif hasattr(demod, 'set_sensitivity'):
-            demod.set_sensitivity(sens)
 
     def get_target_sens(self):
         return self.target_sens
 
     def set_target_sens(self, target_sens):
+        # gfsk_mod 无运行时改 sens API；改了只记变量。改 Sens 请重启本脚本。
         self.target_sens = float(target_sens)
-        self._apply_demod_sensitivity(self.target_sens)
 
     def get_target_freq(self):
         return self.target_freq
 
     def set_target_freq(self, target_freq):
         self.target_freq = target_freq
-        self.iio_pluto_source_0.set_params(
-            self.target_freq, 1000000, 1000000, True, True, True,
-            'manual', self.rx_gain, '', True)
+        self.iio_pluto_sink_0.set_params(
+            self.target_freq, 1000000, 1000000, self.tx_atten, '', True)
 
-    def get_rx_gain(self):
-        return self.rx_gain
+    def get_tx_atten(self):
+        return self.tx_atten
 
-    def set_rx_gain(self, rx_gain):
-        self.rx_gain = rx_gain
+    def set_tx_atten(self, tx_atten):
+        self.tx_atten = float(tx_atten)
         self.set_target_freq(self.target_freq)
 
     def get_samp_rate(self):
@@ -216,20 +196,14 @@ class tx_radio(gr.top_block, Qt.QWidget):
         self.qtgui_freq_sink_x_0.set_frequency_range(0, self.samp_rate)
 
 
-
-
-
 def main(top_block_cls=tx_radio, options=None):
-
     if StrictVersion("4.5.0") <= StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):
         style = gr.prefs().get_string('qtgui', 'style', 'raster')
         Qt.QApplication.setGraphicsSystem(style)
     qapp = Qt.QApplication(sys.argv)
 
     tb = top_block_cls()
-
     tb.start()
-
     tb.show()
 
     def sig_handler(sig=None, frame=None):
@@ -248,6 +222,7 @@ def main(top_block_cls=tx_radio, options=None):
 
     qapp.aboutToQuit.connect(quitting)
     qapp.exec_()
+
 
 if __name__ == '__main__':
     main()

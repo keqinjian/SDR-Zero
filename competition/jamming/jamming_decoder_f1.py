@@ -17,7 +17,7 @@ RPC_URL = "http://127.0.0.1:8080"
 
 # 【极其重要】：请务必将这里替换为你电脑上 GNU Radio 生成的 Python 脚本的绝对路径！
 # 例如: "/home/auto/桌面/SDR-Zero/SDR-Zero/tx_radio_s.py"
-GRC_SCRIPT_PATH = "tx_radio.py"
+GRC_SCRIPT_PATH = "/home/kitz/radar26/ws_26/src/SDR-Zero/competition/jamming/tx_radio.py"
 
 # 黑匣子录制配置
 RECORD_STREAM = True
@@ -37,7 +37,7 @@ AIR_FRAME_LEN = 27
 # 官方干扰波频率对照表 (频率 Hz, Sensitivity)
 FREQ_MAP = {
     'RED':  [(432200000, 2.8323), (432500000, 2.5809), (432800000, 0.6646)],
-    'BLUE': [(434920000, 2.8323), (434620000, 2.5809), (434320000, 0.6646)]
+    'BLUE': [(434920000, 2.8323), (434620000, 2.5809), (434320000, 0.6646),(432200000, 2.8323), (432500000, 2.5809), (432800000, 0.6646)]
 }
 
 # ================= 大疆 RM 官方 CRC 校验表 =================
@@ -101,6 +101,7 @@ class JammingControllerNode(Node):
         super().__init__('jamming_controller_node')
         self.publisher_ = self.create_publisher(String, 'radar/jamming_key', 10)
         self.enemy_camp = 'BLUE'
+        # self.enemy_camp = 'RED'
         self.get_logger().info('干扰波解码已启动')
 
     def publish_key(self, key_str):

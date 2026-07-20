@@ -1,11 +1,11 @@
 options:
   parameters:
-    author: keqinjian
+    author: SDR-Zero
     category: '[GRC Hier Blocks]'
     cmake_opt: ''
-    comment: ''
+    comment: 'Jamming-wave TX mock V2 | UDP:12347 XMLRPC:8083'
     copyright: ''
-    description: ''
+    description: 'UDP -> GFSK Mod SPS=47 -> Pluto Sink'
     gen_cmake: 'On'
     gen_linking: dynamic
     generate_options: qt_gui
@@ -21,7 +21,7 @@ options:
     run_options: prompt
     sizing_mode: fixed
     thread_safe_setters: ''
-    title: Not titled yet
+    title: jamming_mock TX (V2)
     window_size: ''
   states:
     bus_sink: false
@@ -44,42 +44,40 @@ blocks:
     coordinate: [184, 12]
     rotation: 0
     state: enabled
-- name: blocks_throttle_0
-  id: blocks_throttle
+- name: target_freq
+  id: variable
   parameters:
-    affinity: ''
-    alias: ''
-    comment: ''
-    ignoretag: 'True'
-    maxoutbuf: '0'
-    minoutbuf: '0'
-    samples_per_second: samp_rate
-    type: complex
-    vlen: '1'
+    comment: 'RED L1 432.2 / L2 432.5 / L3 432.8'
+    value: '432200000'
   states:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [512, 356]
+    coordinate: [312, 12]
     rotation: 0
     state: true
-- name: blocks_udp_sink_0
-  id: blocks_udp_sink
+- name: target_sens
+  id: variable
   parameters:
-    affinity: ''
-    alias: ''
-    comment: ''
-    eof: 'True'
-    ipaddr: 127.0.0.1
-    port: '14346'
-    psize: '1472'
-    type: byte
-    vlen: '1'
+    comment: 'L1 2.8194 / L2 2.5681 / L3 0.6517'
+    value: '2.8194'
   states:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [960, 187]
+    coordinate: [456, 12]
+    rotation: 0
+    state: true
+- name: tx_atten
+  id: variable
+  parameters:
+    comment: 'jam is strong; start small atten'
+    value: '10'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [600, 12]
     rotation: 0
     state: true
 - name: blocks_udp_source_0
@@ -92,7 +90,7 @@ blocks:
     ipaddr: 127.0.0.1
     maxoutbuf: '0'
     minoutbuf: '0'
-    port: '12345'
+    port: '12347'
     psize: '1472'
     type: byte
     vlen: '1'
@@ -100,32 +98,9 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [497, 18]
+    coordinate: [80, 160]
     rotation: 0
-    state: true
-- name: digital_gfsk_demod_0
-  id: digital_gfsk_demod
-  parameters:
-    affinity: ''
-    alias: ''
-    comment: ''
-    freq_error: '0.0'
-    gain_mu: '0.175'
-    log: 'False'
-    maxoutbuf: '0'
-    minoutbuf: '0'
-    mu: '0.5'
-    omega_relative_limit: '0.005'
-    samples_per_symbol: '52'
-    sensitivity: '1.5756'
-    verbose: 'False'
-  states:
-    bus_sink: false
-    bus_source: false
-    bus_structure: null
-    coordinate: [728, 171]
-    rotation: 0
-    state: true
+    state: enabled
 - name: digital_gfsk_mod_0
   id: digital_gfsk_mod
   parameters:
@@ -136,16 +111,38 @@ blocks:
     log: 'False'
     maxoutbuf: '0'
     minoutbuf: '0'
-    samples_per_symbol: '52'
-    sensitivity: '1.5756'
+    samples_per_symbol: '47'
+    sensitivity: target_sens
     verbose: 'False'
   states:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [501, 212]
+    coordinate: [320, 160]
     rotation: 0
-    state: true
+    state: enabled
+- name: iio_pluto_sink_0
+  id: iio_pluto_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    attenuation1: tx_atten
+    auto_filter: 'True'
+    bandwidth: '1000000'
+    buffer_size: '32768'
+    comment: 'CHANGE URI to TX Pluto'
+    cyclic: 'False'
+    filter: ''
+    frequency: target_freq
+    samplerate: '1000000'
+    uri: '''ip:192.168.2.2'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [600, 144]
+    rotation: 0
+    state: enabled
 - name: qtgui_freq_sink_x_0
   id: qtgui_freq_sink_x
   parameters:
@@ -165,9 +162,9 @@ blocks:
     average: '1.0'
     axislabels: 'True'
     bw: samp_rate
-    color1: '"blue"'
+    color1: '"red"'
     color10: '"dark blue"'
-    color2: '"red"'
+    color2: '"blue"'
     color3: '"green"'
     color4: '"black"'
     color5: '"cyan"'
@@ -196,7 +193,7 @@ blocks:
     legend: 'True'
     maxoutbuf: '0'
     minoutbuf: '0'
-    name: '""'
+    name: jamming_tx
     nconnections: '1'
     showports: 'False'
     tr_chan: '0'
@@ -223,16 +220,28 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [737, 344]
+    coordinate: [600, 320]
+    rotation: 0
+    state: true
+- name: xmlrpc_server_0
+  id: xmlrpc_server
+  parameters:
+    addr: localhost
+    alias: ''
+    comment: ''
+    port: '8083'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [80, 40]
     rotation: 0
     state: true
 
 connections:
-- [blocks_throttle_0, '0', digital_gfsk_demod_0, '0']
-- [blocks_throttle_0, '0', qtgui_freq_sink_x_0, '0']
 - [blocks_udp_source_0, '0', digital_gfsk_mod_0, '0']
-- [digital_gfsk_demod_0, '0', blocks_udp_sink_0, '0']
-- [digital_gfsk_mod_0, '0', blocks_throttle_0, '0']
+- [digital_gfsk_mod_0, '0', iio_pluto_sink_0, '0']
+- [digital_gfsk_mod_0, '0', qtgui_freq_sink_x_0, '0']
 
 metadata:
   file_format: 1

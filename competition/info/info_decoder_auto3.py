@@ -6,10 +6,10 @@ import datetime
 import xmlrpc.client # 导入 RPC 库
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String, Int8
 
 # ================= 战术配置 =================
-MY_CAMP = 'BLUE'    # 修改此处切换阵营: 'RED' 或 'BLUE'
+MY_CAMP = 'RED'    # 启动默认阵营；运行中由话题 /team (Int8: 0=红 1=蓝) 覆盖
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346  
 RPC_URL = "http://127.0.0.1:8081"
@@ -26,10 +26,9 @@ RECORD_PREFIX = "info_record"
 
 ACCESS_CODE_HEX = "2F6F4C74B914492E"
 ACCESS_CODE_BITS = bin(int(ACCESS_CODE_HEX, 16))[2:].zfill(64)
+# 【核心防御】：弱信号极易丢失前导，跳过前 16 位，只匹配后 48 位！
 FUZZY_CODE = ACCESS_CODE_BITS[16:]
 
-EXPECTED_HEADER_BE = bytes([0x00, 0x0F, 0x00, 0x0F])
-EXPECTED_HEADER_LE = bytes([0x0F, 0x00, 0x0F, 0x00])
 AIR_FRAME_LEN = 27
 
 # ================= 大疆 RM 官方 CRC 校验 =================
@@ -55,12 +54,38 @@ def bits_to_bytes(bit_string):
 class InfoDecoderNode(Node):
     def __init__(self):
         super().__init__('info_decoder_node')
+        self.ally_camp = MY_CAMP
+        self.grc_rpc = None
         self.pub_pos   = self.create_publisher(String, 'radio/info/position', 10)
         self.pub_hp    = self.create_publisher(String, 'radio/info/hp', 10)
         self.pub_ammo  = self.create_publisher(String, 'radio/info/ammo', 10)
         self.pub_macro = self.create_publisher(String, 'radio/info/macro', 10)
         self.pub_buff  = self.create_publisher(String, 'radio/info/buff', 10)
-        self.get_logger().info(f'信息波解析启动，当前阵营: {MY_CAMP}]')
+        self.create_subscription(Int8, '/team', self.team_callback, 10)
+        self.get_logger().info('信息波监听已启动[初始阵营: %s，以 /team 为准]' % (self.ally_camp,))
+
+    def team_callback(self, msg):
+        v = msg.data
+        new_camp = None
+        if v == 0:
+            new_camp = 'RED'
+        elif v == 1:
+            new_camp = 'BLUE'
+        else:
+            return
+        if new_camp == self.ally_camp:
+            return
+        self.ally_camp = new_camp
+        self.get_logger().info('阵营已更新(来自 /team): %s' % (self.ally_camp,))
+        rpc = self.grc_rpc
+        if rpc is None:
+            return
+        try:
+            target_f = INFO_FREQ_MAP[self.ally_camp]
+            rpc.set_target_freq(target_f)
+            self.get_logger().info('GNU Radio 已切至 %.3f MHz' % (target_f / 1e6,))
+        except Exception as e:
+            self.get_logger().error('切频失败: %s' % (e,))
 
     def publish_data(self, publisher, data_dict):
         msg = String()
@@ -113,23 +138,24 @@ def main():
     rclpy.init()
     ros_node = InfoDecoderNode()
 
-    # 1. 尝试连接 GNU Radio 遥控器并自动切频
+    # 1. 尝试连接 GNU Radio 遥控器并切频
     try:
         grc_rpc = xmlrpc.client.ServerProxy(RPC_URL)
-        target_f = INFO_FREQ_MAP[MY_CAMP]
+        ros_node.grc_rpc = grc_rpc
+        target_f = INFO_FREQ_MAP[ros_node.ally_camp]
         grc_rpc.set_target_freq(target_f)
-        ros_node.get_logger().info(f"已切换到频率: {target_f/1e6} MHz")
+        ros_node.get_logger().info(f"切换到频率: {target_f/1e6} MHz")
     except Exception as e:
-        ros_node.get_logger().error(f"法连接到 GNU Radio XMLRPC (端口 8081): {e}")
+        ros_node.get_logger().error(f"无法连接到 GNU Radio XMLRPC (端口 8081): {e}")
 
-    # 2. 初始化录制
+    # 2. 初始化黑匣子录制
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    current_record_file = f"{RECORD_PREFIX}_{MY_CAMP}_{now}.txt"
+    current_record_file = f"{RECORD_PREFIX}_{ros_node.ally_camp}_{now}.txt"
     file_recorder = None
     if RECORD_STREAM:
         try:
             file_recorder = open(current_record_file, 'w')
-            ros_node.get_logger().info(f"比特流录制已开启: {current_record_file}")
+            ros_node.get_logger().info(f"录制已开启: {current_record_file}")
         except Exception as e:
             ros_node.get_logger().error(f"录制创建失败: {e}")
 
@@ -159,47 +185,86 @@ def main():
                     file_recorder.flush()
             except BlockingIOError: pass
 
-            # --- 解析逻辑 ---
+            # --- 第一层：暴力突防 (无视 Header，只认 Access Code) ---
             while len(bit_buffer) >= AIR_FRAME_LEN * 8:
                 idx = bit_buffer.find(FUZZY_CODE)
-                if idx == -1: bit_buffer = bit_buffer[-63:]; break
+                if idx == -1: 
+                    bit_buffer = bit_buffer[-63:]
+                    break
+                    
                 start_idx = idx - 16
-                if start_idx < 0: bit_buffer = bit_buffer[idx:]; continue
-                if len(bit_buffer) < start_idx + (AIR_FRAME_LEN * 8): break 
+                if start_idx < 0: 
+                    bit_buffer = bit_buffer[idx+1:]
+                    continue
+                    
+                if len(bit_buffer) < start_idx + (AIR_FRAME_LEN * 8): 
+                    break 
+
                 frame_bits = bit_buffer[start_idx : start_idx + (AIR_FRAME_LEN * 8)]
                 frame_bytes = bits_to_bytes(frame_bits)
-                if frame_bytes and (frame_bytes[8:12] == EXPECTED_HEADER_BE or frame_bytes[8:12] == EXPECTED_HEADER_LE):
+                
+                # ⚡ 暴力逻辑：不再检查 [8:12] 的 Header！
+                # 直接切下后面 19 字节 (包含 Header 4字节 + Payload 15字节) 全部塞进大水池
+                if frame_bytes:
                     serial_buffer.extend(frame_bytes[12:27])
-                    bit_buffer = bit_buffer[start_idx + (AIR_FRAME_LEN * 8):]
-                else: bit_buffer = bit_buffer[idx+1:]
+                    
+                bit_buffer = bit_buffer[start_idx + (AIR_FRAME_LEN * 8):]
             
+            # --- 第二层：血雨腥风捞 0xA5 (双重 CRC 铁闸) ---
             while len(serial_buffer) >= 9:
                 sof_idx = serial_buffer.find(0xA5)
-                if sof_idx == -1: serial_buffer.clear(); break
-                if sof_idx > 0: serial_buffer = serial_buffer[sof_idx:]
-                if len(serial_buffer) < 5: break
+                if sof_idx == -1: 
+                    serial_buffer.clear()
+                    break
+                    
+                if sof_idx > 0: 
+                    serial_buffer = serial_buffer[sof_idx:]
+                    
+                if len(serial_buffer) < 5: 
+                    break
+                
+                # 铁闸 1：CRC8
                 if calc_crc8(serial_buffer[:4]) != serial_buffer[4]:
-                    serial_buffer = serial_buffer[1:]; continue
+                    serial_buffer = serial_buffer[1:]
+                    continue
+                    
                 data_length = struct.unpack('<H', serial_buffer[1:3])[0]
                 expected_len = 5 + 2 + data_length + 2
-                if expected_len > 128 or len(serial_buffer) < expected_len: break
+                
+                if expected_len > 128: 
+                    serial_buffer = serial_buffer[1:]
+                    continue
+                    
+                if len(serial_buffer) < expected_len: 
+                    break 
+                    
                 full_frame = serial_buffer[:expected_len]
+                
+                # 铁闸 2：CRC16
                 if calc_crc16(full_frame[:-2]) == struct.unpack('<H', full_frame[-2:])[0]:
+                    # 🚀 恭喜！你在乱码中捞到了真金！
                     cmd_id = struct.unpack('<H', full_frame[5:7])[0]
                     actual_data = full_frame[7 : 7 + data_length]
+                    
                     if cmd_id == 0x0A01: parse_0x0A01(actual_data, ros_node); packet_counter["0x0A01"]+=1
                     elif cmd_id == 0x0A02: parse_0x0A02(actual_data, ros_node); packet_counter["0x0A02"]+=1
                     elif cmd_id == 0x0A03: parse_0x0A03(actual_data, ros_node); packet_counter["0x0A03"]+=1
                     elif cmd_id == 0x0A04: parse_0x0A04(actual_data, ros_node); packet_counter["0x0A04"]+=1
                     elif cmd_id == 0x0A05: parse_0x0A05(actual_data, ros_node); packet_counter["0x0A05"]+=1
-                serial_buffer = serial_buffer[expected_len:]
+                    
+                    serial_buffer = serial_buffer[expected_len:]
+                else:
+                    # 漏洞修复：如果 CRC16 失败，只往前挪 1 字节
+                    serial_buffer = serial_buffer[1:]
+                    
             rclpy.spin_once(ros_node, timeout_sec=0.001)
 
     except KeyboardInterrupt: pass
     finally:
         if file_recorder: file_recorder.close()
         ros_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
