@@ -90,7 +90,8 @@ class tx_radio(gr.top_block, Qt.QWidget):
         self.pluto_uri = pluto_uri = 'ip:192.168.3.1'
         self.target_sens = target_sens = 1.5628
         self.target_freq = target_freq = 433200000  # 默认红方广播；decoder 会 RPC 覆盖
-        self.rx_gain = rx_gain = 40                 # 信息波 -60 dBm，增益需够
+        # 信息波弱信号；近场交叉测若仍 Header=0，可临时提到 50（注意勿削波）
+        self.rx_gain = rx_gain = 45
         self.samp_rate = samp_rate = 1000000
 
         ##################################################

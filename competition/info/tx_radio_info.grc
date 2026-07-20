@@ -186,7 +186,7 @@ blocks:
     filter: ''
     frequency: target_freq
     gain1: '''manual'''
-    manual_gain1: '40'
+    manual_gain1: '45'
     maxoutbuf: '0'
     minoutbuf: '0'
     quadrature: 'True'

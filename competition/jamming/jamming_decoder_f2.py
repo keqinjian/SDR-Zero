@@ -22,7 +22,7 @@ RoboMaster 2026 雷达站 · 干扰波解码器（新一代）
        │  拼出裁判帧 0x0A06 → 读出 6 位 ASCII 密钥
        ▼
   ROS2 话题 radar/jamming_key
-       │
+       │  每次 CRC 通过的 0x0A06 都发一次（同一密钥重复收到也会发）
        ▼
   （上层）通过裁判系统 0x0121 把密钥交给服务器验证
 
@@ -318,10 +318,12 @@ class JammingDecoderNode(Node):
         # 立即切到己方一级频点，勿等主循环（与 info_decoder_f1 对齐）
         self._camp_changed = True
 
-    def publish_key(self, key: str, source: str = "strict") -> None:
+    def publish_key(self, key: str, source: str = "strict", *, log: bool = True) -> None:
         """
-        source=strict：CRC 通过的密钥 → 同时发 radar/jamming_key + meta
-        source=recovered：投票恢复 → 默认只发 meta；PUBLISH_RECOVERED_KEY=True 才进主话题
+        每次成功解出密钥都发布（含同一密钥重复收到）。
+        source=strict：CRC 通过 → radar/jamming_key + meta
+        source=recovered：投票恢复 → 默认只 meta；PUBLISH_RECOVERED_KEY=True 才进主话题
+        log：是否打 info 日志（重复密钥建议 False，避免 10Hz 刷屏）
         """
         meta = String()
         meta.data = f'{{"key":"{key}","source":"{source}"}}'
@@ -332,7 +334,8 @@ class JammingDecoderNode(Node):
             msg.data = key
             self.pub_key.publish(msg)
 
-        self.get_logger().info(f"密钥截获 [{source}]: {key}")
+        if log:
+            self.get_logger().info(f"密钥截获 [{source}]: {key}")
 
 
 # =============================================================================
@@ -520,12 +523,12 @@ def drain_jam_frames(
 
         stats["frames_ok"] += 1
         stats["strict_keys"] += 1
-        if key != last_key_holder[0]:
-            node.publish_key(key, source="strict")
-            last_key_holder[0] = key
-        else:
-            # 同一密钥重复报到：仍刷新锁定，但少刷屏
+        # 每次 CRC 通过的密钥都发话题（含重复）；仅日志在密钥变化时打，避免 10Hz 刷屏
+        changed = key != last_key_holder[0]
+        if not changed:
             stats["dup_keys"] += 1
+        node.publish_key(key, source="strict", log=changed)
+        last_key_holder[0] = key
 
 
 # =============================================================================
@@ -741,7 +744,7 @@ def main() -> None:
     bit_buffer = ""
     serial_buffer = bytearray()
     vote_pool: list[bytes] = []
-    last_key_holder = [""]          # 仅 strict / 正式发布去重
+    last_key_holder = [""]          # 最近一次 strict 密钥（日志变化检测用；话题每次都发）
     last_recovered_holder = [""]    # meta 投票去重，互不污染
     stats = _fresh_stats()
     last_stat = time.time()

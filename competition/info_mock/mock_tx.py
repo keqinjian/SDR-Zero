@@ -290,7 +290,8 @@ def main() -> None:
         f"0x0A05={LEN_0A05}B"
     )
     print("请确认已启动: python3 competition/info_mock/tx_radio.py")
-    print("RX 请听同一阵营广播频，且 TX/RX 使用两台不同 Pluto\n")
+    print("RX 请听同一阵营广播频，且 TX=SDR-A / RX=SDR-B（两台不同 Pluto）")
+    print("若 Header 一直为 0：检查 info_mock/tx_radio.py 的 tx_atten（交叉测应≈10，勿用40）\n")
 
     hero_hp = 2000
     seq = 0

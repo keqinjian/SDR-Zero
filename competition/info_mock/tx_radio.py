@@ -31,7 +31,9 @@ competition/info_mock/tx_radio.py
 【现场常改】
 ---------------------------------------------------------------------------
   target_freq —— 红 433200000 / 蓝 433920000（也可用 mock_tx --camp 经 RPC 改）
-  tx_atten    —— 衰减 dB，越大越弱；信息波官方约 -60 dBm，近场可先 30～50
+  tx_atten    —— 衰减 dB，越大发射越弱。
+                 ★ 近场交叉测默认 10（与 jamming_mock 同量级）；勿用 40——会弱到 Header=0
+                 要模拟官方约 -60 dBm 时再加大到 40～60
 
 ---------------------------------------------------------------------------
 【端口与 RPC】
@@ -116,7 +118,9 @@ class tx_radio(gr.top_block, Qt.QWidget):
         # 信息波 Sens 固定 1.5628（规则表 5-23）；换阵营只换频，不换 Sens
         self.target_sens = target_sens = 1.5628
         self.target_freq = target_freq = 433200000   # 默认红方；蓝方 433920000
-        self.tx_atten = tx_atten = 40.0              # dB，越大越弱（信息波官方约 -60 dBm）
+        # ★ 交叉测关键：默认 10。曾用 40 时 RX 频谱只到 -80dB、decoder Header=0；
+        #   jamming_mock 用 10 能通。官方弱功率场景再手动加大 atten。
+        self.tx_atten = tx_atten = 10.0
         self.samp_rate = samp_rate = 1000000
 
         ##################################################

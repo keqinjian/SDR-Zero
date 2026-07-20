@@ -71,8 +71,8 @@ blocks:
 - name: tx_atten
   id: variable
   parameters:
-    comment: 'larger = weaker TX'
-    value: '40'
+    comment: '交叉测默认10；越大越弱。勿用40近场（会Header=0）'
+    value: '10'
   states:
     bus_sink: false
     bus_source: false
