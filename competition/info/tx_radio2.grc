@@ -1,0 +1,334 @@
+options:
+  parameters:
+    author: SDR-Zero
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: '信息波 f3 渐进抗干扰结构图；运行入口 tx_radio2.py；默认展示 balanced 档'
+    copyright: ''
+    description: 'Pluto RX -> optional DC blocker -> steep FIR -> GFSK demod -> UDP'
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: tx_radio2_flow
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: info RX anti-jam f3
+    window_size: ''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: samp_rate
+  id: variable
+  parameters:
+    comment: '等效采样率；首版不做 2.083M 重采样'
+    value: '1000000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [160, 16]
+    rotation: 0
+    state: enabled
+- name: target_freq
+  id: variable
+  parameters:
+    comment: '红 433.2M；蓝由 f3 RPC 切到 433.92M'
+    value: '433200000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [160, 72]
+    rotation: 0
+    state: enabled
+- name: target_sens
+  id: variable
+  parameters:
+    comment: '规则 V2 信息波 Sensitivity'
+    value: '1.5628'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [160, 128]
+    rotation: 0
+    state: enabled
+- name: rf_bandwidth
+  id: variable
+  parameters:
+    comment: 'balanced 默认 600k；baseline 1M；strong 540k'
+    value: '600000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [320, 16]
+    rotation: 0
+    state: enabled
+- name: rx_gain
+  id: variable
+  parameters:
+    comment: 'balanced 35；削顶继续降，弱信号消失则升'
+    value: '35'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [320, 72]
+    rotation: 0
+    state: enabled
+- name: fir_cutoff
+  id: variable
+  parameters:
+    comment: 'balanced 260k'
+    value: '260000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [480, 16]
+    rotation: 0
+    state: enabled
+- name: fir_transition
+  id: variable
+  parameters:
+    comment: 'balanced 20k'
+    value: '20000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [480, 72]
+    rotation: 0
+    state: enabled
+- name: blocks_udp_sink_0
+  id: blocks_udp_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: '解调 bit -> info_decoder_f3'
+    eof: 'True'
+    ipaddr: 127.0.0.1
+    port: '14346'
+    psize: '1472'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1248, 368]
+    rotation: 0
+    state: enabled
+- name: dc_blocker_xx_0
+  id: dc_blocker_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 'balanced/strong 使用 32；baseline 由 tx_radio2.py 运行时旁路'
+    length: '32'
+    long_form: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: complex
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [768, 320]
+    rotation: 0
+    state: enabled
+- name: digital_gfsk_demod_0
+  id: digital_gfsk_demod
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: '首版保留稳定 gfsk_demod；下一阶段再试显式 symbol_sync'
+    freq_error: '0.0048'
+    gain_mu: '0.175'
+    log: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    mu: '0.5'
+    omega_relative_limit: '0.005'
+    samples_per_symbol: '47'
+    sensitivity: target_sens
+    verbose: 'False'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1088, 320]
+    rotation: 0
+    state: enabled
+- name: iio_pluto_source_0
+  id: iio_pluto_source
+  parameters:
+    affinity: ''
+    alias: ''
+    auto_filter: 'True'
+    bandwidth: rf_bandwidth
+    bbdc: 'True'
+    buffer_size: '32768'
+    comment: 'SDR-B；模拟带宽必须使用 rf_bandwidth，不能写死 1M'
+    filter: ''
+    frequency: target_freq
+    gain1: '''manual'''
+    manual_gain1: rx_gain
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    quadrature: 'True'
+    rfdc: 'True'
+    samplerate: samp_rate
+    uri: '''ip:192.168.3.1'''
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [592, 320]
+    rotation: 0
+    state: enabled
+- name: low_pass_filter_0
+  id: low_pass_filter
+  parameters:
+    affinity: ''
+    alias: ''
+    beta: '6.76'
+    comment: '高抑制度信息波专用 FIR'
+    cutoff_freq: fir_cutoff
+    decim: '1'
+    gain: '1'
+    interp: '1'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    samp_rate: samp_rate
+    type: fir_filter_ccf
+    width: fir_transition
+    win: firdes.WIN_BLACKMAN_hARRIS
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [912, 320]
+    rotation: 0
+    state: enabled
+- name: qtgui_freq_sink_x_0
+  id: qtgui_freq_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '0.2'
+    axislabels: 'True'
+    bw: samp_rate
+    color1: '"gray"'
+    color10: '"dark blue"'
+    color2: '"blue"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: '输入0=原始 IQ；输入1=滤波后 IQ'
+    ctrlpanel: 'False'
+    fc: '0'
+    fftsize: '2048'
+    freqhalf: 'True'
+    grid: 'True'
+    gui_hint: ''
+    label: Relative Gain
+    label1: '"raw before FIR"'
+    label10: ''''''
+    label2: '"filtered"'
+    label3: ''''''
+    label4: ''''''
+    label5: ''''''
+    label6: ''''''
+    label7: ''''''
+    label8: ''''''
+    label9: ''''''
+    legend: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '"info anti-jam: raw / filtered"'
+    nconnections: '2'
+    showports: 'False'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_tag: '""'
+    type: complex
+    units: dB
+    update_time: '0.10'
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    wintype: firdes.WIN_BLACKMAN_hARRIS
+    ymax: '10'
+    ymin: '-140'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [920, 144]
+    rotation: 0
+    state: enabled
+- name: xmlrpc_server_0
+  id: xmlrpc_server
+  parameters:
+    addr: localhost
+    alias: ''
+    comment: '与 f3 RPC_URL 一致'
+    port: '8081'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [320, 160]
+    rotation: 0
+    state: enabled
+
+connections:
+- [dc_blocker_xx_0, '0', low_pass_filter_0, '0']
+- [digital_gfsk_demod_0, '0', blocks_udp_sink_0, '0']
+- [iio_pluto_source_0, '0', dc_blocker_xx_0, '0']
+- [iio_pluto_source_0, '0', qtgui_freq_sink_x_0, '0']
+- [low_pass_filter_0, '0', digital_gfsk_demod_0, '0']
+- [low_pass_filter_0, '0', qtgui_freq_sink_x_0, '1']
+
+metadata:
+  file_format: 1
