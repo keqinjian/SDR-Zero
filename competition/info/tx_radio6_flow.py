@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""f6 近最优信息波接收主图：探头、慢偏置、匹配滤波、软/硬双输出。"""
+"""
+tx_radio6_flow.py —— f6 接收主图（小白说明）
+==========================================
+
+链路：FIR → 鉴频 → 慢偏置扣除 → Gauss 匹配滤波 → symbol_sync
+     → 硬比特 UDP + 软符号 UDP
+     → IQ/FM/soft 探头（给 AGC）+ 可选 IQ 录波
+
+慢偏置时间常数很长，避免把 Header 里连续多个 0 当成“直流”滤掉。
+"""
 
 from __future__ import annotations
 

@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RoboMaster 2026 信息波通用自适应解码器 f5。
+info_decoder_f5.py —— 现场自适应信息波解码器（给无线电小白的说明）
+================================================================
 
-在 f4 协议门闩之上增加：
-  1. symbol_sync(M&M+MMSE) 物理层（tx_radio5）；
-  2. 基于现场统计的 RF/FIR 运行时自动调参；
-  3. Access 汉明上限随误同步迹象动态收紧/放宽；
-  4. 更长比特缓冲，便于弱信号跨包重组。
+【一句话】不用你手工来回改增益/带宽：程序看着统计数字，自动换接收档。
 
-空口参数仍严格对齐 V2：SPS=47、Sens=1.5628、Header 精确匹配、CRC 有效才发布。
+【相对 f4 多了什么】
+  1) 物理层优先用更稳的 symbol_sync（M&M + MMSE 插值），对不齐再回退旧时钟环
+  2) 每 2 秒看一眼：有没有 Access？Header？CRC 帧？UDP 忙不忙？
+     然后经 XMLRPC 热切换 RF 带宽 / 增益 / FIR（见 tx_radio5_tunes.py）
+  3) Access 容错会在 2～4 之间自己收紧/放宽（假同步多就收紧）
+  4) 比特缓冲更长，弱信号跨很多空口片时不容易“忘了前半截”
+
+【白话比喻】
+  f3/f4 像固定档相机；f5 像带简易自动曝光：拍糊了就换一组预设参数再试。
+  它仍然不会“猜”CRC 失败的业务数据——自动调的是收音机旋钮，不是裁判帧内容。
+
+【硬约束（别改歪）】
+  SPS=47、Sens=1.5628、Header 精确匹配、CRC 通过才发 ROS。
+
+【怎么启动】
+  INFO_F5_PROFILE=auto python3 competition/info/info_decoder_f5.py
+  关掉自动换档：INFO_F5_AUTO_TUNE=0 …
+  详见 competition/docs/信息波f5自适应调试指南.md
 """
 
 from __future__ import annotations
@@ -31,18 +45,23 @@ import info_decoder_f3 as f3
 from tx_radio5_tunes import AUTO_TUNE_ORDER, RUNTIME_TUNES
 
 
+# =============================================================================
+# ★★★★★ 现场优先只改这里 ★★★★★
+# =============================================================================
 MY_CAMP = "RED"
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
 RPC_URL = "http://127.0.0.1:8081"
 
+# auto = 允许运行时换档；baseline / weak_fixed = 更偏固定接收
 F5_PROFILE = os.environ.get("INFO_F5_PROFILE", "auto").strip().lower()
 ENABLE_AUTO_TUNE = os.environ.get("INFO_F5_AUTO_TUNE", "1") not in (
     "0", "false", "False", "no", "NO",
 )
+# Access：平时可放到 4；发现“假包很多、CRC 全挂”时收到 2
 ACCESS_MAX_HAMMING_LOOSE = int(os.environ.get("INFO_F5_ACCESS_HAMMING", "4"))
 ACCESS_MAX_HAMMING_TIGHT = 2
-HEADER_MAX_HAMMING = 0
+HEADER_MAX_HAMMING = 0  # Header 仍不允许花码
 
 ENABLE_PACKET_WINDOW_RECOVERY = True
 PACKET_WINDOW_PAYLOADS = 8
@@ -63,15 +82,16 @@ RECORD_PREFIX = "info_f5_record"
 SELF_TEST_ON_START = True
 STAT_INTERVAL_S = 2.0
 IDLE_SLEEP_S = 0.001
-BIT_BUFFER_MAX = 180_000
+BIT_BUFFER_MAX = 180_000  # 比 f3/f4 更长，给弱信号拼包留余量
 SERIAL_BUFFER_MAX = 16_384
 
-# 自适应控制器阈值（均按 STAT_INTERVAL_S 窗口理解）。
-AUTO_COOLDOWN_S = float(os.environ.get("INFO_F5_AUTO_COOLDOWN_S", "6"))
-AUTO_EXPLORE_SILENCE_S = float(os.environ.get("INFO_F5_AUTO_SILENCE_S", "4"))
-AUTO_LOCK_GOOD_WINDOWS = 3
-AUTO_RELOCK_SILENCE_S = 10.0
-UDP_BUSY_BYTES = 20_000
+# ---- 自动换档“脾气”参数（单位：秒或计数，均相对 2s 统计窗）----
+AUTO_COOLDOWN_S = float(os.environ.get("INFO_F5_AUTO_COOLDOWN_S", "6"))  # 两次大换档最短间隔
+AUTO_EXPLORE_SILENCE_S = float(os.environ.get("INFO_F5_AUTO_SILENCE_S", "4"))  # 无帧多久开始探索
+AUTO_LOCK_GOOD_WINDOWS = 3  # 连续几个好窗口就锁定当前档
+AUTO_RELOCK_SILENCE_S = 10.0  # 锁定后再无帧多久重新探索
+UDP_BUSY_BYTES = 20_000  # UDP 很忙但完全无 Access → 怀疑前端削顶
+# =============================================================================
 
 INFO_FREQ_MAP = base.INFO_FREQ_MAP
 INFO_SENSITIVITY = base.INFO_SENSITIVITY
@@ -91,6 +111,7 @@ base.UDP_WATCHDOG_S = UDP_WATCHDOG_S
 base.GRC_BOOT_WAIT_S = GRC_BOOT_WAIT_S
 base.RPC_URL = RPC_URL
 
+# 组帧/发布与 f3 共用
 find_valid_frames = f3.find_valid_frames
 drain_strict_frames = f3.drain_strict_frames
 handle_valid_frame = f3.handle_valid_frame
@@ -99,11 +120,14 @@ f3.FRAME_DEDUP_TTL_S = FRAME_DEDUP_TTL_S
 
 class AdaptiveController:
     """
-    根据 2s 统计窗口决定 RF/FIR 档与 Access 容错。
+    现场“自动曝光”控制器。
 
-    状态：
-      explore — 轮换 RUNTIME_TUNES，寻找有效帧
-      locked  — 保持当前档；长时间无帧后重新探索
+    每 2 秒读一次统计，决定要不要经 XMLRPC 换 RUNTIME_TUNES 里的档：
+      explore — 还没稳定出帧，按表轮换 balanced→wide_fir→…
+      locked  — 已经连续出帧，先别乱动；长时间又没帧再探索
+
+    Access 容错（2/4）在本地改，不需要重启 GNU Radio。
+    换 RF/FIR 档会清空比特缓冲（大改接收机后旧 0/1 不可信）。
     """
 
     def __init__(self, start_tune: str = "balanced") -> None:
@@ -169,6 +193,16 @@ class AdaptiveController:
         silence_s: float,
         elapsed_s: float,
     ) -> None:
+        """
+        根据刚过去这一窗的统计做决策。
+
+        判读口诀（小白版）：
+          - 有有效帧 → 保持，争取进入 locked
+          - UDP 很多但 Access=0 → 可能 IQ 顶平，切 desense（降增益）
+          - 有 Access 无 Header → 滤波可能切太狠，放宽 FIR
+          - 有 Header 无完整帧 → Payload 烂了，试抬增益或收窄邻道
+          - 其它长时间无帧 → 按 AUTO_TUNE_ORDER 轮换
+        """
         frames = int(stats.get("strict_frames", 0)) + int(
             stats.get("window_frames", 0)
         )
@@ -370,6 +404,10 @@ def _header_hamming(header_bits: str) -> int:
 def extract_air_payloads(
     bit_buffer: str, stats: dict, access_max: int
 ) -> tuple[str, list[bytes]]:
+    """
+    拆空口 Payload；access_max 可由自适应控制器在 2～4 之间切换。
+    Header 仍必须精确匹配（与 f4 相同铁律）。
+    """
     payloads: list[bytes] = []
     while len(bit_buffer) >= AIR_FRAME_BITS:
         found = _find_access(bit_buffer, access_max)
@@ -452,7 +490,10 @@ def _flip_bits(bits: str, positions: tuple[int, ...]) -> str:
 
 
 def run_self_test(node: InfoDecoderNode) -> bool:
-    """纯内存测试；不调用 publisher，不污染正式 ROS 话题。"""
+    """
+    纯内存自检：连续切片、Access 容错、坏 Header、CRC，以及 Access 自适应收紧。
+    不调用业务 publisher，避免假数据进正式话题。
+    """
     node.get_logger().info("==== f5 纯内存自检开始 ====")
     rounds = b"".join(_build_test_round(index * 5) for index in range(3))
     if len(rounds) != 420:
@@ -544,6 +585,7 @@ def connect_grc(node: InfoDecoderNode) -> None:
 
 
 def main() -> None:
+    """主循环：收比特 → 拆包组帧 → 每 2s 让 AdaptiveController 决定是否换档。"""
     rclpy.init()
     node = InfoDecoderNode()
 

@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""信息波 f6 近最优接收入口。"""
+"""
+tx_radio6.py —— 信息波 f6 接收入口（小白说明）
+============================================
+
+在 f5 基础上增加：
+  - 慢偏置扣除 + Gauss 匹配滤波
+  - 硬比特 UDP 14346 + 软符号 float UDP 14347
+  - IQ/FM 探头（给解码器做 AGC）
+  - 可选 INFO_F6_IQ_RECORD=路径 录 IQ 复盘
+
+与 info_decoder_f6 配对；SPS=47 / Sens=1.5628 不变。
+"""
 
 from __future__ import annotations
 

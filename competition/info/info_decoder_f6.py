@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RoboMaster 2026 信息波近最优解码器 f6。
+info_decoder_f6.py —— 近最优信息波解码器（给无线电小白的说明）
+================================================================
 
-在 f5 之上增加：
-  1. IQ/FM 探头驱动的连续 AGC（小步调增益不清缓冲）；
-  2. soft float UDP 上的 Access 软相关同步；
-  3. Header 仍严格硬匹配；CRC 有效才发布；
-  4. 离散 RF/FIR 档仅作兜底大步探索。
+【一句话】能“看见”收音机前端是否削顶，并尽量在软域对齐包头，再严格 CRC 发布。
+
+【相对 f5 多了什么】
+  1) GNU Radio 里装了探头：报告 IQ 峰值/有效值、鉴频均值（粗估频偏）
+     → 连续微调增益（AGC），小步调通常不清空比特缓冲
+  2) 除了硬 0/1（UDP 14346），还有 soft 浮点符号（UDP 14347）
+     → 用相关运算找 Access，弱信号下比单纯数汉明距离更稳
+  3) 物理层带匹配滤波 + 慢偏置扣除（不是会毁掉 Header 长 0 的短 DC）
+  4) 仍可用离散档大步换 FIR/带宽作兜底；IQ 可录波离线复盘
+
+【千万记住】
+  - soft 只帮你“找信封口”；Payload/业务仍硬判 + CRC，绝不软猜发布。
+  - Header 仍必须精确 00 0F 00 0F。
+  - 不要与 f3/f4/f5 同时开同一 Pluto/端口。
+
+【怎么启动】
+  INFO_F6_PROFILE=auto python3 competition/info/info_decoder_f6.py
+  比赛保守：INFO_F6_AUTO=0 INFO_F6_PROFILE=fixed_balanced …
+  详见 competition/docs/信息波f6近最优接收设计.md
 """
 
 from __future__ import annotations
@@ -38,10 +53,13 @@ from tx_radio6_tunes import (
 )
 
 
+# =============================================================================
+# ★★★★★ 现场优先只改这里 ★★★★★
+# =============================================================================
 MY_CAMP = "RED"
 UDP_IP = "127.0.0.1"
-UDP_PORT = 14346
-SOFT_UDP_PORT = int(os.environ.get("INFO_F6_SOFT_UDP_PORT", "14347"))
+UDP_PORT = 14346  # 硬比特（每个 UDP 字节 = 1 bit）
+SOFT_UDP_PORT = int(os.environ.get("INFO_F6_SOFT_UDP_PORT", "14347"))  # 软符号 float32
 RPC_URL = "http://127.0.0.1:8081"
 
 F6_PROFILE = os.environ.get("INFO_F6_PROFILE", "auto").strip().lower()
@@ -54,6 +72,7 @@ ENABLE_SOFT_SYNC = os.environ.get("INFO_F6_SOFT_SYNC", "1") not in (
 ACCESS_MAX_HAMMING_LOOSE = int(os.environ.get("INFO_F6_ACCESS_HAMMING", "4"))
 ACCESS_MAX_HAMMING_TIGHT = 2
 HEADER_MAX_HAMMING = 0
+# 软相关分数门槛（理想 ±1 符号时满分约 64；噪声下会低一些）
 SOFT_CORR_MIN = float(os.environ.get("INFO_F6_SOFT_CORR_MIN", "40"))
 
 ENABLE_PACKET_WINDOW_RECOVERY = True
@@ -83,7 +102,8 @@ AUTO_COOLDOWN_S = float(os.environ.get("INFO_F6_AUTO_COOLDOWN_S", "6"))
 AUTO_EXPLORE_SILENCE_S = float(os.environ.get("INFO_F6_AUTO_SILENCE_S", "4"))
 AUTO_LOCK_GOOD_WINDOWS = 3
 AUTO_RELOCK_SILENCE_S = 10.0
-AGC_COOLDOWN_S = float(os.environ.get("INFO_F6_AGC_COOLDOWN_S", "2"))
+AGC_COOLDOWN_S = float(os.environ.get("INFO_F6_AGC_COOLDOWN_S", "2"))  # 小步增益冷却
+# =============================================================================
 
 INFO_FREQ_MAP = base.INFO_FREQ_MAP
 INFO_SENSITIVITY = base.INFO_SENSITIVITY
@@ -124,7 +144,14 @@ IQ_CLIP_RMS_EFF = _clip_env("INFO_F6_IQ_CLIP_RMS", IQ_CLIP_RMS)
 
 
 class AdaptiveController:
-    """探头驱动连续 AGC + 离散档兜底；小步 AGC 不 flush。"""
+    """
+    f6 自适应大脑：探头真值 + 连续 AGC + 离散档兜底。
+
+    和 f5 最大差别：
+      - 先问 GNU Radio“IQ 是不是顶平了？”再决定降不降增益
+      - 小步 AGC（apply_agc_gain）默认不清空 bit/soft 缓冲
+      - 只有大改 RF 带宽/FIR 时才 flush（旧比特不可信）
+    """
 
     def __init__(self, start_tune: str = "balanced") -> None:
         if start_tune not in RUNTIME_TUNES:
@@ -492,7 +519,11 @@ def find_access_soft(
     access_max: int,
 ) -> Optional[tuple[int, bool, float, int]]:
     """
-    软相关找 Access（从左到右首个过阈）。返回 (offset, inverted, corr, hard_hamming)。
+    在软符号流上找 Access（从左到右第一个过阈值的位置）。
+
+    白话：把 Access 的 0/1 看成 -1/+1 模板，和 soft 波形做“点积”。
+    对齐得好时分数高；整包反相时用负模板（等价于分数取反）。
+    返回 (offset, inverted, corr, 由 sign(soft) 估的硬汉明距离)。
     """
     if len(soft) < 64:
         return None
@@ -527,6 +558,11 @@ def soft_to_hard_bits(soft: list[float], inverted: bool) -> str:
 def extract_air_payloads_soft(
     soft: list[float], stats: dict, access_max: int
 ) -> tuple[list[float], list[bytes]]:
+    """
+    软域拆空口包：相关找 Access → sign() 得到硬比特 → Header 仍硬匹配。
+
+    soft 再聪明也只负责同步；Header/CRC 铁律与 f3/f4 相同。
+    """
     payloads: list[bytes] = []
     while len(soft) >= AIR_FRAME_SYMBOLS:
         found = find_access_soft(
@@ -576,6 +612,7 @@ def extract_air_payloads_soft(
 def extract_air_payloads_hard(
     bit_buffer: str, stats: dict, access_max: int
 ) -> tuple[str, list[bytes]]:
+    """硬比特路径（与 f4 相同思路）：soft 端口挂了也能单独工作。"""
     payloads: list[bytes] = []
     while len(bit_buffer) >= AIR_FRAME_BITS:
         found = _find_access_hard(bit_buffer, access_max)
@@ -658,6 +695,10 @@ def _flip_bits(bits: str, positions: tuple[int, ...]) -> str:
 
 
 def run_self_test(node: InfoDecoderNode) -> bool:
+    """
+    纯内存自检：硬切片 + 软相关 + 坏 Header 必丢 + Access 自适应收紧 + CRC。
+    不连电台，也不往正式 ROS 话题灌假数据。
+    """
     node.get_logger().info("==== f6 纯内存自检开始 ====")
     rounds = b"".join(_build_test_round(index * 5) for index in range(3))
     if len(rounds) != 420:
@@ -779,6 +820,13 @@ def _recv_soft_floats(sock: socket.socket, stats: dict) -> list[float]:
 
 
 def main() -> None:
+    """
+    主循环：
+      收硬比特 UDP +（可选）软符号 UDP
+      → 优先软相关拆包，硬路径补充
+      → 拼裁判帧 → CRC → ROS
+      → 每 2s 用探头/统计做 AGC 或换档
+    """
     rclpy.init()
     node = InfoDecoderNode()
 

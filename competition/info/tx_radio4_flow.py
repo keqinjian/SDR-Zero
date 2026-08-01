@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""f4 弱信号信息波接收主图：在 f3 前端后展开 GFSK 解调链。"""
+"""
+tx_radio4_flow.py —— f4 接收主图（小白说明）
+==========================================
+
+在 tx_radio2 的 Pluto/FIR/XMLRPC 前端之后，把黑盒 gfsk_demod 拆成：
+  鉴频 →（可选判决域DC，正式档建议关）→ 短平滑 → M&M 时钟 → 切片 → UDP
+
+这样弱信号时能单独拧“时钟松紧/平滑”，而不改官方 SPS/Sens。
+"""
 
 from __future__ import annotations
 

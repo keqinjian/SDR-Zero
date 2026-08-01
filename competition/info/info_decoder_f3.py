@@ -1,15 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RoboMaster 2026 信息波渐进抗干扰解码器 f3。
+info_decoder_f3.py —— 信息波抗干扰解码器（给无线电小白的说明）
+================================================================
 
-f3 不改现有 radio/info/* 接口，也不发布 CRC 失败的数据。相对 f1 首版只做：
-  1) 完整 64-bit Access Code 汉明距离同步（正/反相）；
-  2) 保留严格字节流解析，并增加 CRC 有效的 Payload 窗口复扫；
-  3) 统一去重、按命令统计 Hz，便于联合测试逐项调参。
+【一句话】把天线收到的“哔哔声”变成位置/血量等比赛数据，并发布到 ROS。
 
-物理层由同目录 tx_radio2.py 提供。先用 baseline 回归，再切 balanced/strong；
-不要一次把所有参数改满，否则现场无法判断是哪一项真正有效。
+【整条链路像寄信】
+  官方基座发射机（很弱的信息波，约 -40～-60 dBm）
+       │  用 GFSK 把 0/1 调制到 433 MHz 附近
+       ▼
+  PlutoSDR + GNU Radio（tx_radio2.py）
+       │  解调后经 UDP 送来一长串 0 和 1（每个字节只表示 1 bit）
+       ▼
+  ★ 本程序 f3 ★
+       │  ① 在 0/1 海里找到“空口信封”（Access + Header + 15 字节）
+       │  ② 把多封信封拼成裁判系统“长信”（0x0A01～0x0A05）
+       │  ③ CRC 校验通过才发布，绝不瞎猜业务数据
+       ▼
+  ROS 话题 radio/info/{position,hp,ammo,macro,buff}
+
+【小词典】
+  - SPS=47：每个比特占 47 个采样点（官方 V2 规定，不能改错）
+  - Sensitivity：解调器“灵敏度”旋钮，官方信息波为 1.5628
+  - Access Code：64 位“暗号”，用来对齐包头（信息波与干扰波暗号不同）
+  - 汉明距离：两串 0/1 有几位不一样；允许差 2 位叫“容错 2”
+  - Header 00 0F 00 0F：声明后面 Payload 长度是 15 字节
+  - CRC：校验码，算错就丢掉，防止脏数据进上层
+  - 反相：整串 0/1 翻过来（接收极性反了时仍能解）
+
+【f3 相对 f1 多做了什么】
+  1) Access 允许最多 2 bit 花码（噪声下更容易对齐）
+  2) 除了“严格按字节河拼帧”，还在最近若干 15B 片上窗口复扫 CRC 有效帧
+  3) 统一去重 + 每几秒打一次 Hz 统计，方便调参
+
+【怎么启动】
+  INFO_ANTIJAM_PROFILE=balanced python3 competition/info/info_decoder_f3.py
+  物理层档位在 tx_radio2.py：baseline / balanced / strong（别一次改满）
 """
 
 from __future__ import annotations
@@ -30,25 +57,26 @@ import info_decoder_f1 as base
 
 
 # =============================================================================
-# ★★★★★ 解码抗干扰参数调试区（现场优先只改这里）★★★★★
+# ★★★★★ 现场优先只改这里（其它常量多半对齐官方，别乱动）★★★★★
 # =============================================================================
-MY_CAMP = "RED"  # /team: Int8 0=RED, 1=BLUE 会覆盖
-UDP_IP = "127.0.0.1"
-UDP_PORT = 14346
-RPC_URL = "http://127.0.0.1:8081"
+MY_CAMP = "RED"  # 默认己方颜色；运行中 /team: 0=红, 1=蓝 会覆盖
+UDP_IP = "127.0.0.1"          # 本机收比特
+UDP_PORT = 14346              # 与 tx_radio2 发送端口一致（信息波）
+RPC_URL = "http://127.0.0.1:8081"  # 遥控 GNU Radio 切频/改参数
 
-# 与 tx_radio2.py 使用同一个环境变量；仅用于选择物理层档位和日志标识。
+# 与 tx_radio2.py 共用：决定射频带宽、增益、滤波器“松紧”
 ANTIJAM_PROFILE = os.environ.get("INFO_ANTIJAM_PROFILE", "balanced").strip().lower()
 
-# 完整 64 bit Access 容错。2 表示允许任意两位花码；Header 仍必须完全正确。
+# Access 容错：2 = 64 位暗号最多错 2 位仍算找到包头；Header 仍必须完全正确
 ENABLE_FULL_ACCESS_HAMMING = True
 ACCESS_MAX_HAMMING = 2
 
-# CRC 有效的包窗口复扫。它不会发布 CRC 失败的“猜测数据”。
+# 窗口复扫：在最近几片 15B 拼盘里再找 CRC 通过的裁判帧（仍不发 CRC 失败数据）
 ENABLE_PACKET_WINDOW_RECOVERY = True
-PACKET_WINDOW_PAYLOADS = 8       # 8×15B 足够覆盖最大 0x0A05 帧及相邻边界
-FRAME_DEDUP_TTL_S = 2.0
+PACKET_WINDOW_PAYLOADS = 8       # 8×15B，够盖住最长 0x0A05 及边界
+FRAME_DEDUP_TTL_S = 2.0          # 同一帧 2 秒内不重复发布
 
+# 看门狗：UDP 一段时间没数据就重启 GNU Radio（mock 调试可设环境变量关掉）
 ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
     "0", "false", "False", "no", "NO",
 )
@@ -58,32 +86,32 @@ GRC_SCRIPT_PATH = os.environ.get(
 )
 UDP_WATCHDOG_S = 2.0
 GRC_BOOT_WAIT_S = 3.0
-RECORD_STREAM = True
+RECORD_STREAM = True                 # 是否把 0/1 存成文本便于复盘
 RECORD_PREFIX = "info_f3_record"
-SELF_TEST_ON_START = True
-STAT_INTERVAL_S = 5.0
+SELF_TEST_ON_START = True            # 启动先用假数据自检协议逻辑
+STAT_INTERVAL_S = 5.0                # 统计日志间隔（秒）
 IDLE_SLEEP_S = 0.001
-BIT_BUFFER_MAX = 50_000
-SERIAL_BUFFER_MAX = 8_192
+BIT_BUFFER_MAX = 50_000              # 0/1 缓冲上限，防内存涨爆
+SERIAL_BUFFER_MAX = 8_192            # 拼好的字节河上限
 # =============================================================================
 
 
-# 沿用 f1 已对齐 V2 的协议、CRC 与业务解析，避免复制两套协议后逐渐漂移。
-INFO_FREQ_MAP = base.INFO_FREQ_MAP
-INFO_SENSITIVITY = base.INFO_SENSITIVITY
-ACCESS_CODE_HEX = base.ACCESS_CODE_HEX
-AC_NORMAL = base.AC_NORMAL
-AC_INVERTED = base.AC_INVERTED
+# 协议数字全部复用 f1（已按 V2 对齐），避免两套表慢慢漂开
+INFO_FREQ_MAP = base.INFO_FREQ_MAP           # 红/蓝信息波中心频率
+INFO_SENSITIVITY = base.INFO_SENSITIVITY     # 1.5628
+ACCESS_CODE_HEX = base.ACCESS_CODE_HEX       # 信息波 Access
+AC_NORMAL = base.AC_NORMAL                   # 64 位 0/1 正相
+AC_INVERTED = base.AC_INVERTED               # 反相
 AC_NORMAL_INT = int(AC_NORMAL, 2)
 ACCESS_MASK = (1 << 64) - 1
-AIR_FRAME_BITS = base.AIR_FRAME_BITS
-AIR_ACCESS_LEN = base.AIR_ACCESS_LEN
-AIR_HEADER_LEN = base.AIR_HEADER_LEN
-AIR_PAYLOAD_LEN = base.AIR_PAYLOAD_LEN
-HEADER_OFFICIAL = base.HEADER_OFFICIAL
+AIR_FRAME_BITS = base.AIR_FRAME_BITS         # 一个空口包总比特数 = 216
+AIR_ACCESS_LEN = base.AIR_ACCESS_LEN         # 8 字节
+AIR_HEADER_LEN = base.AIR_HEADER_LEN         # 4 字节
+AIR_PAYLOAD_LEN = base.AIR_PAYLOAD_LEN       # 15 字节
+HEADER_OFFICIAL = base.HEADER_OFFICIAL       # b'\x00\x0f\x00\x0f'
 CMD_DATA_LEN = base.CMD_DATA_LEN
 
-# 让复用的 f1 看门狗函数拉起 tx_radio2，而不是旧 tx_radio。
+# 告诉 f1 的看门狗：请拉起 tx_radio2，而不是旧版 tx_radio
 base.ENABLE_GRC_WATCHDOG = ENABLE_GRC_WATCHDOG
 base.GRC_SCRIPT_PATH = GRC_SCRIPT_PATH
 base.UDP_WATCHDOG_S = UDP_WATCHDOG_S
@@ -92,7 +120,7 @@ base.RPC_URL = RPC_URL
 
 
 class InfoDecoderNode(base.Node):
-    """保持 f1 的 ROS 接口，节点名改为 info_decoder_f3。"""
+    """ROS2 节点：对外话题与 f1 相同，只是节点名叫 info_decoder_f3。"""
 
     def __init__(self) -> None:
         super().__init__("info_decoder_f3")
@@ -170,10 +198,11 @@ def _fresh_stats() -> dict:
 
 def _find_access(bit_buffer: str) -> Optional[tuple[int, bool, int]]:
     """
-    返回 (offset, 是否反相, 汉明距离)。
+    在 0/1 海里找 Access Code（包头暗号）。
 
-    滚动 64-bit 整数只做 XOR + bit_count；反相码是正相码逐位取反，
-    因而反相距离等于 64 - 正相距离。
+    返回 (起始下标, 是否整包反相, 汉明距离)。
+    白话：拿一把 64 齿的梳子从左往右梳；允许最多差 ACCESS_MAX_HAMMING 齿。
+    若正相差很多、反相却很近，说明接收极性反了，后面要把整包 0/1 翻转回来。
     """
     if len(bit_buffer) < 64:
         return None
@@ -205,8 +234,14 @@ def extract_air_payloads(
     bit_buffer: str, stats: dict
 ) -> tuple[str, list[bytes]]:
     """
-    完整 Access 汉明同步 → 极性纠正 → 精确 Header 门闩 → 15B Payload。
-    假同步只前进 1 bit；真包才跨过完整 216 bit。
+    从比特流抽出空口 Payload（每片正好 15 字节）。
+
+    步骤（像拆快递）：
+      1) 用 Access 找到信封起点（可容错几位）
+      2) 若反相则先翻回正相
+      3) Header 必须精确是 00 0F 00 0F，否则当作假对齐，只前进 1 bit 再找
+      4) 真信封才一次吃掉完整 216 bit，取出中间 15 字节
+    返回：(吃剩的比特缓冲, 新得到的 Payload 列表)
     """
     payloads: list[bytes] = []
     while len(bit_buffer) >= AIR_FRAME_BITS:
@@ -249,6 +284,14 @@ def extract_air_payloads(
 
 
 def _candidate_frame(data: bytes, start: int) -> Optional[bytes]:
+    """
+    尝试把 data[start:] 解释成一帧裁判串口包。
+
+    裁判帧长相（小端）：
+      A5 | len(2B) | seq | CRC8 | cmd_id(2B) | data… | CRC16(2B)
+    CRC8 只保护前 4 字节；CRC16 保护整帧（不含最后 2 字节自身）。
+    任一环节不对就返回 None——窗口扫描靠它“试探”，不会发布半吊子帧。
+    """
     if start + 9 > len(data) or data[start] != 0xA5:
         return None
     if base.calc_crc8(data[start:start + 4]) != data[start + 4]:
@@ -263,7 +306,12 @@ def _candidate_frame(data: bytes, start: int) -> Optional[bytes]:
 
 
 def find_valid_frames(data: bytes) -> list[bytes]:
-    """不修改输入，在任意 Payload 窗口里搜索完整 CRC 有效裁判帧。"""
+    """
+    窗口复扫：不破坏原字节串，在任意位置找以 0xA5 开头且 CRC 全过的裁判帧。
+
+    为什么需要？信息波一封业务信往往跨多个 15B 空口片；片边界一错，
+    “严格按顺序吃字节”可能暂时拼不出，但窗口里其实已经躺着完整好帧。
+    """
     frames: list[bytes] = []
     cursor = 0
     while cursor + 9 <= len(data):
@@ -280,7 +328,12 @@ def find_valid_frames(data: bytes) -> list[bytes]:
 
 
 def drain_strict_frames(serial_buffer: bytearray, stats: dict) -> list[bytes]:
-    """f1 严格字节河路径：CRC 失败滑 1 字节，完整有效帧才返回。"""
+    """
+    严格字节河：Payload 按到达顺序首尾相接，像流水线上的传送带。
+
+    见到 0xA5 尝试读一帧；CRC8/CRC16 任一失败就丢掉 1 字节再试。
+    只有校验全过才从缓冲里切除并返回——这是正式发布的主路径。
+    """
     frames: list[bytes] = []
     while len(serial_buffer) >= 9:
         sof = serial_buffer.find(0xA5)
@@ -329,7 +382,12 @@ def handle_valid_frame(
     dedupe: dict,
     now: float,
 ) -> bool:
-    """统一长度门闩、去重、业务解析；返回是否首次发布。"""
+    """
+    统一处理一帧已通过 CRC 的裁判数据：检查命令长度 → 去重 → 解析发布。
+
+    source 只是日志标记（strict / window），不会改变“必须 CRC 通过”的铁律。
+    返回 True 表示这是第一次看到并成功发布了该帧。
+    """
     data_len = struct.unpack_from("<H", frame, 1)[0]
     seq = frame[3]
     cmd_id = struct.unpack_from("<H", frame, 5)[0]
@@ -460,6 +518,14 @@ def connect_grc(node: InfoDecoderNode) -> None:
 
 
 def main() -> None:
+    """
+    主循环（按时间顺序理解即可）：
+      1) 启动 ROS 节点 + 可选离线自检
+      2) 拉起 / 连接 tx_radio2（GNU Radio）
+      3) 绑 UDP，不断收 0/1
+      4) Access+Header → 15B Payload → 拼裁判帧 → CRC → ROS
+      5) 顺带做窗口复扫与看门狗重启
+    """
     rclpy.init()
     node = InfoDecoderNode()
 

@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RoboMaster 2026 信息波弱信号解码器 f4。
+info_decoder_f4.py —— 弱信号信息波解码器（给无线电小白的说明）
+================================================================
 
-保持 f3 的协议、CRC、ROS 话题和双路径组帧，只增强：
-  1. Access Code 受控扩展到最多 4 bit 花码；
-  2. 固定空口 Header 严格匹配官方 00 0F 00 0F；
-  3. 使用 tx_radio4 显式 GFSK 弱信号接收链；
-  4. 启动自检不向正式 ROS 话题发布模拟数据。
+【一句话】在强干扰、信息波很弱（约 -60 dB 量级）时，尽量仍能解出位置/血量等。
+
+【和 f3 的分工】
+  - 协议层（Access / Header / CRC / ROS）与 f3 同一套铁律，不能改歪官方格式。
+  - 物理层换成 tx_radio4：把黑盒 GFSK Demod 拆开，方便弱信号调时钟恢复。
+  - Access 默认可错 4 bit（比 f3 的 2 更宽松）；Header 仍必须精确 00 0F 00 0F。
+
+【物理层在干什么（白话）】
+  天线 IQ → 滤波 → 鉴频（听音调高低）→ 可选平滑 → 时钟对齐 → 判 0/1
+  → UDP 送到本程序。官方 SPS=47、Sens=1.5628 绝不能改错。
+
+【重要提醒】
+  - 判决域短 DC blocker 会把 Header 里“连续很多个 0”当成直流滤掉，f4 正式档默认关。
+  - 自检只在内存里跑，不会往正式 ROS 话题灌假数据。
+  - 不要和 f3 同时开：共用 Pluto、UDP 14346、RPC 8081。
+
+【怎么启动】
+  INFO_F4_PROFILE=weak_antijam python3 competition/info/info_decoder_f4.py
+  详见 competition/docs/信息波f4弱信号调试指南.md
 """
 
 from __future__ import annotations
@@ -28,19 +43,25 @@ import info_decoder_f1 as base
 import info_decoder_f3 as f3
 
 
-MY_CAMP = "RED"
+# =============================================================================
+# ★★★★★ 现场优先只改这里 ★★★★★
+# =============================================================================
+MY_CAMP = "RED"  # /team: 0=红, 1=蓝
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
 RPC_URL = "http://127.0.0.1:8081"
 
+# weak_antijam = 弱信号抗干扰档；baseline = 接近 f3 基线，用来回归
 F4_PROFILE = os.environ.get("INFO_F4_PROFILE", "weak_antijam").strip().lower()
+# Access 容错上限（环境变量可改回 2，更像 f3）
 ACCESS_MAX_HAMMING = int(os.environ.get("INFO_F4_ACCESS_HAMMING", "4"))
-# 官方要求两个 Payload Length 字段一致，且本协议固定为 15B；不允许 Header 花码。
+# Header 不允许花码：官方两份长度字段必须一致，且固定为 15
 HEADER_MAX_HAMMING = 0
 
-ENABLE_PACKET_WINDOW_RECOVERY = True
+ENABLE_PACKET_WINDOW_RECOVERY = True  # 与 f3 相同的窗口 CRC 复扫
 PACKET_WINDOW_PAYLOADS = 8
 FRAME_DEDUP_TTL_S = 2.0
+
 ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
     "0", "false", "False", "no", "NO",
 )
@@ -55,11 +76,13 @@ RECORD_STREAM = os.environ.get("INFO_F4_RECORD", "0") in (
 )
 RECORD_PREFIX = "info_f4_record"
 SELF_TEST_ON_START = True
-STAT_INTERVAL_S = 2.0
+STAT_INTERVAL_S = 2.0  # 比 f3 更勤：弱信号调参需要更快反馈
 IDLE_SLEEP_S = 0.001
 BIT_BUFFER_MAX = 50_000
 SERIAL_BUFFER_MAX = 8_192
+# =============================================================================
 
+# 协议常量全部复用 f1（已对齐 V2）
 INFO_FREQ_MAP = base.INFO_FREQ_MAP
 INFO_SENSITIVITY = base.INFO_SENSITIVITY
 AC_NORMAL = base.AC_NORMAL
@@ -73,14 +96,14 @@ HEADER_OFFICIAL = base.HEADER_OFFICIAL
 HEADER_OFFICIAL_BITS = base.bytes_to_bits(HEADER_OFFICIAL)
 CMD_DATA_LEN = base.CMD_DATA_LEN
 
-# f4 继续复用 f1 的进程看门狗，但改为拉起 tx_radio4。
+# 看门狗拉起 tx_radio4，而不是 f3 的 tx_radio2
 base.ENABLE_GRC_WATCHDOG = ENABLE_GRC_WATCHDOG
 base.GRC_SCRIPT_PATH = GRC_SCRIPT_PATH
 base.UDP_WATCHDOG_S = UDP_WATCHDOG_S
 base.GRC_BOOT_WAIT_S = GRC_BOOT_WAIT_S
 base.RPC_URL = RPC_URL
 
-# 复用 f3 严格裁判帧解析、窗口搜索和统一业务发布。
+# 组帧 / 发布逻辑与 f3 完全一致，避免两套实现漂开
 find_valid_frames = f3.find_valid_frames
 drain_strict_frames = f3.drain_strict_frames
 handle_valid_frame = f3.handle_valid_frame
@@ -88,7 +111,7 @@ f3.FRAME_DEDUP_TTL_S = FRAME_DEDUP_TTL_S
 
 
 class InfoDecoderNode(base.Node):
-    """保持 f3 的全部 ROS 接口，仅节点名改为 info_decoder_f4。"""
+    """ROS 接口与 f3 相同（话题名不变），节点名改为 info_decoder_f4。"""
 
     def __init__(self) -> None:
         super().__init__("info_decoder_f4")
@@ -148,6 +171,7 @@ class InfoDecoderNode(base.Node):
 
 
 def _fresh_stats() -> dict:
+    """每个统计窗口清零用的计数器（日志里 AC0..N、Header OK/FAIL 等）。"""
     return {
         "ac_hits": 0,
         "ac_hits_inverted": 0,
@@ -169,6 +193,13 @@ def _fresh_stats() -> dict:
 
 
 def _find_access(bit_buffer: str) -> Optional[tuple[int, bool, int]]:
+    """
+    在 0/1 海里找 64 位 Access（信息波暗号）。
+
+    返回 (起点, 是否反相, 汉明距离)。
+    与 f3 相同算法，只是默认允许差到 4 位——弱信号下更容易“看见”包头，
+    但假同步增多的风险靠后面的严格 Header + CRC 挡住。
+    """
     if len(bit_buffer) < 64:
         return None
     window = int(bit_buffer[:64], 2)
@@ -188,6 +219,7 @@ def _find_access(bit_buffer: str) -> Optional[tuple[int, bool, int]]:
 
 
 def _header_hamming(header_bits: str) -> int:
+    """Header 与官方 00 0F 00 0F 差几位（f4 要求必须为 0）。"""
     return base.hamming(header_bits, HEADER_OFFICIAL_BITS)
 
 
@@ -195,10 +227,14 @@ def extract_air_payloads(
     bit_buffer: str, stats: dict
 ) -> tuple[str, list[bytes]]:
     """
-    完整 Access 相关搜索 + 固定 Header 严格匹配。
+    从比特流拆出空口 Payload（每片 15 字节）。
 
-    Access 可受控容错，但 Header 必须精确为 00 0F 00 0F，避免将
-    Header 已损坏的 Payload 注入连续字节流；裁判帧还必须通过 CRC。
+    拆快递口诀：
+      1) Access 可容错 → 找到信封口
+      2) 反相则先翻正
+      3) Header 必须一字不差；错了只前进 1 bit（别连坐丢掉后面真包）
+      4) 只有真信封才整包吃掉 216 bit
+    注意：这里只负责“空口片”；拼成 0x0A01～0x0A05 仍要过 CRC。
     """
     payloads: list[bytes] = []
     while len(bit_buffer) >= AIR_FRAME_BITS:
@@ -282,7 +318,12 @@ def _flip_bits(bits: str, positions: tuple[int, ...]) -> str:
 
 
 def run_self_test(node: InfoDecoderNode) -> bool:
-    """纯内存测试；不调用 parser/publisher，不污染正式 ROS 话题。"""
+    """
+    纯内存协议自检（不需要 Pluto）。
+
+    覆盖：连续 420B 切片、Access 4bit 容错、坏 Header 必丢、CRC 双路径去重。
+    故意不调用业务 parser/publisher，避免假数据污染正式 ROS 话题。
+    """
     node.get_logger().info("==== f4 纯内存自检开始 ====")
     rounds = b"".join(_build_test_round(index * 5) for index in range(3))
     if len(rounds) != 420:
@@ -357,6 +398,7 @@ def connect_grc(node: InfoDecoderNode) -> None:
 
 
 def main() -> None:
+    """主循环：收 UDP 比特 → 拆空口包 → 拼裁判帧 → CRC 后发 ROS。"""
     rclpy.init()
     node = InfoDecoderNode()
 

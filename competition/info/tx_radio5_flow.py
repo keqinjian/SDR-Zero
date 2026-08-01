@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""f5 通用自适应信息波接收主图：symbol_sync + 运行时 RF/FIR 调参。"""
+"""
+tx_radio5_flow.py —— f5 接收主图（小白说明）
+==========================================
+
+相对 f4：优先 symbol_sync(M&M+MMSE) 做时钟恢复；并提供 apply_runtime_tune()
+给解码器热切换 RF 带宽/增益/FIR。无 symbol_sync 时自动回退 clock_recovery_mm。
+"""
 
 from __future__ import annotations
 

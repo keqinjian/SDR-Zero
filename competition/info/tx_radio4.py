@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""信息波 f4 弱信号接收入口。"""
+"""
+tx_radio4.py —— 信息波 f4 的 GNU Radio 接收入口（小白说明）
+========================================================
+
+本文件只负责“收音机”：Pluto 收 433MHz → 鉴频/时钟 → 把 0/1 经 UDP 14346 送给
+info_decoder_f4.py。协议解析不在这里做。
+
+环境变量 INFO_F4_PROFILE：
+  weak_antijam — 弱信号抗干扰（默认）
+  baseline     — 接近 f3 基线，用来对比有没有退步
+
+官方空口旋钮固定：SPS=47，Sensitivity=1.5628，采样率 1MHz。
+"""
 
 from __future__ import annotations
 

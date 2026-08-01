@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""信息波 f5 通用自适应接收入口。"""
+"""
+tx_radio5.py —— 信息波 f5 接收入口（小白说明）
+============================================
+
+收音机侧：优先 symbol_sync 时钟恢复；解码器可通过 XMLRPC 热切换
+RF 带宽/增益/FIR（档位表在 tx_radio5_tunes.py）。
+
+INFO_F5_PROFILE=auto|baseline|weak_fixed
+空口参数仍固定 SPS=47 / Sens=1.5628。与 info_decoder_f5 配对使用。
+"""
 
 from __future__ import annotations
 

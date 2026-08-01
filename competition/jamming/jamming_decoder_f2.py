@@ -1,49 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-jamming_decoder_f2.py
-=====================
-RoboMaster 2026 雷达站 · 干扰波解码器（新一代）
-对齐：通信协议 V2.0.0 + 规则手册 V2.1.0
+jamming_decoder_f2.py —— 干扰波密钥解码器（给无线电小白的说明）
+================================================================
 
----------------------------------------------------------------------------
-本程序在整条链路中的位置
----------------------------------------------------------------------------
+【一句话】听己方基座上的强干扰波，抠出对方自定义的 6 位密钥，发给上层去 0x0121 验证。
 
-  官方干扰源（放在【己方】雷达基座上）
-       │  发射 GFSK 干扰波（很强，约 -10 dBm）
-       │  里面夹着「对方自定义的 6 位密钥」
+【和信息波有啥不一样？（超级重要）】
+  - 干扰波很强（约 -10 dBm），信息波很弱（约 -40～-60 dBm）
+  - 干扰波 Access Code 不同：0x16E8D377151C712D（别和信息波那串搞混）
+  - 密钥帧 0x0A06 整帧恰好 15 字节 = 正好 1 个空口 Payload
+    → 不像信息波要拼很多片，所以“好解得多”
+
+【整条链路】
+  官方干扰源（在【己方】雷达基座上）
+       │  GFSK，三级频点/灵敏度不同
        ▼
-  PlutoSDR + GNU Radio(GFSK Demod, SPS=47)
-       │  UDP 输出一串 0/1
+  PlutoSDR + GNU Radio（本目录 tx_radio.py，SPS=47）
+       │  UDP 14348 送来 0/1；XMLRPC 8080 用来切频/改 Sens
        ▼
-  ★ 本程序 ★
-       │  找干扰波 Access Code → 校验 Header → 抽出 15 字节 Payload
-       │  拼出裁判帧 0x0A06 → 读出 6 位 ASCII 密钥
+  ★ 本程序 f2 ★
+       │  Access → Header(00 0F 00 0F) → 15B → 0x0A06 → 6 位 ASCII 密钥
        ▼
-  ROS2 话题 radar/jamming_key
-       │  每次 CRC 通过的 0x0A06 都发一次（同一密钥重复收到也会发）
-       ▼
-  （上层）通过裁判系统 0x0121 把密钥交给服务器验证
+  ROS：radar/jamming_key（严格 CRC）
+       以及 radar/jamming_key_meta（可带 source=strict/recovered）
 
----------------------------------------------------------------------------
+【阵营别听反了】
+  规则：红方干扰源在红方基座，里面装的是蓝方密钥（蓝方同理）。
+  所以己方是红 → 扫红方 432.2 / 432.5 / 432.8 MHz。
+  旧版听“敌方频点”是几何错误；本版用 ally_camp（己方）。
 
-  「红方干扰源放在红方基座，携带蓝方自定义密钥」——蓝方同理。
-  所以：己方是红 → 听红方三级干扰频点（432.2 / 432.5 / 432.8 MHz）。
-  旧版 f1 用 enemy_camp 扫敌方频点，几何上是错的；本版改为 ally_camp。
+【相对 f1 的升级】
+  1) 阵营语义修正 + /team 切换
+  2) Header 门闩；失败只滑 1 bit
+  3) V2 Sensitivity：2.8194 / 2.5681 / 0.6517
+  4) 密钥逐字节投票（CRC 偶发挂时调试用；默认不进主话题）
+  5) 启动离线自检
 
----------------------------------------------------------------------------
-相对 jamming_decoder_f1 的升级
----------------------------------------------------------------------------
+【小词典】
+  - 扫频：一级带宽最宽最好收，收不到再试二/三级
+  - 模糊 Access：先匹配后 48 bit，再复核前 16 bit（允 2 bit 花）
+  - 投票恢复：多个“长得像密钥”的 15B 片，对每个 ASCII 字节少数服从多数
 
-  1. 【修旧 bug】阵营语义改为己方基座频点 + /team 切换
-  2. 【修旧 bug】Header 门闩 + 前缀复核；失败只前进 1 bit
-  3. 【对齐新规则】Sensitivity 表 2.8194 / 2.5681 / 0.6517
-  4. 【增强】密钥按字节投票（CRC 偶发失败时仍可能恢复）
-  5. 【增强】启动离线自检（正相/反相/组帧）
-  6. 详细中文注释，方便无线电小白维护
-
-依赖：干扰波 GRC 已设 SPS=47，UDP→14348，XMLRPC→8080；ROS2。
+依赖：SPS=47，UDP→14348，XMLRPC→8080，ROS2。
 """
 
 from __future__ import annotations
@@ -291,12 +290,18 @@ def wrap_as_air_bits(byte_stream: bytes) -> str:
 # =============================================================================
 
 class JammingDecoderNode(Node):
+    """
+    ROS2 节点：对外主要发 6 位密钥字符串。
+
+    ally_camp = 己方颜色（决定听哪一组干扰频点），不是“敌方颜色”。
+    """
+
     def __init__(self) -> None:
         super().__init__("jamming_decoder_f2")
         self.ally_camp = MY_CAMP
-        self._camp_changed = False
+        self._camp_changed = False  # 主循环看到后立刻切到己方一级频点
         self.pub_key = self.create_publisher(String, "radar/jamming_key", 10)
-        # 可选：区分严格 CRC 密钥 / 投票恢复密钥，方便上层策略
+        # meta：带 source 字段，便于区分 CRC 严格解 / 投票恢复（调试）
         self.pub_key_meta = self.create_publisher(String, "radar/jamming_key_meta", 10)
         self.create_subscription(Int8, "/team", self.team_callback, 10)
         self.get_logger().info(
@@ -349,8 +354,15 @@ def _prefix_ok(frame_bits: str) -> bool:
 
 def extract_air_payloads(bit_buffer: str, stats: dict) -> tuple[str, bytearray]:
     """
-    与 info_decoder_f1 同策略：
-      模糊 AC 双搜 → Header 门闩 → 前缀复核 → 失败只 +1 bit。
+    从 0/1 海里捞出干扰波空口 Payload（每次成功 +15 字节）。
+
+    步骤（白话）：
+      1) 用 Access 后 48 bit 做模糊搜索（正相/反相都试）——噪声下更好找
+      2) 回退 16 bit 对齐完整 64 bit Access 起点
+      3) Header 必须是 00 0F 00 0F，并且前 16 bit Access 复核过关
+      4) 失败只前进 1 bit（别整包跳过，可能把真包滑走）
+
+    返回：(吃剩的比特, 新追加的 Payload 字节)
     """
     appended = bytearray()
 
@@ -598,7 +610,13 @@ def restart_grc(node: JammingDecoderNode) -> None:
 
 
 def apply_scan_channel(node: JammingDecoderNode, level_idx: int) -> None:
-    """level_idx: 0/1/2 → 干扰等级 1/2/3。"""
+    """
+    把 Pluto 切到己方某一档干扰信道。
+
+    level_idx: 0/1/2 → 官方干扰等级 1/2/3。
+    每一档的中心频率和 Sensitivity 成对出现（表 5-23），必须一起改，
+    否则解调器“旋钮”和实际音调对不上，会解不出。
+    """
     global _grc_rpc
     table = JAM_FREQ_MAP[node.ally_camp]
     level_idx %= len(table)
@@ -625,6 +643,10 @@ def apply_scan_channel(node: JammingDecoderNode, level_idx: int) -> None:
 # =============================================================================
 
 def run_self_test(node: JammingDecoderNode) -> bool:
+    """
+    不接电台也能跑：造一帧 0x0A06，走正相/反相空口路径，再测投票恢复。
+    注意：自检里会调用 publish_key，可能往话题打一两次测试密钥——上场前知悉。
+    """
     node.get_logger().info("==== 干扰波离线自检开始 ====")
     ok = True
     sample_key = "Ab12Xy"
@@ -695,6 +717,13 @@ def _fresh_stats() -> dict:
 # =============================================================================
 
 def main() -> None:
+    """
+    主循环逻辑（按时间理解）：
+      1) 自检 → 拉起/连接干扰波 GRC
+      2) 收 UDP 0/1 → 拆空口 Payload → 找 0x0A06 → 发密钥
+      3) 一段时间解不出 → 扫下一档干扰等级（一级→二级→三级→循环）
+      4) UDP 断流 → 看门狗重启 GRC
+    """
     global _grc_rpc
 
     rclpy.init()
