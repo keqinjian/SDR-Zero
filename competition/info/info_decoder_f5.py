@@ -1,0 +1,735 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+RoboMaster 2026 信息波通用自适应解码器 f5。
+
+在 f4 协议门闩之上增加：
+  1. symbol_sync(M&M+MMSE) 物理层（tx_radio5）；
+  2. 基于现场统计的 RF/FIR 运行时自动调参；
+  3. Access 汉明上限随误同步迹象动态收紧/放宽；
+  4. 更长比特缓冲，便于弱信号跨包重组。
+
+空口参数仍严格对齐 V2：SPS=47、Sens=1.5628、Header 精确匹配、CRC 有效才发布。
+"""
+
+from __future__ import annotations
+
+from collections import deque
+import datetime
+import os
+import socket
+import struct
+import time
+import xmlrpc.client
+from typing import Optional
+
+import rclpy
+from std_msgs.msg import Int8, String
+
+import info_decoder_f1 as base
+import info_decoder_f3 as f3
+from tx_radio5_tunes import AUTO_TUNE_ORDER, RUNTIME_TUNES
+
+
+MY_CAMP = "RED"
+UDP_IP = "127.0.0.1"
+UDP_PORT = 14346
+RPC_URL = "http://127.0.0.1:8081"
+
+F5_PROFILE = os.environ.get("INFO_F5_PROFILE", "auto").strip().lower()
+ENABLE_AUTO_TUNE = os.environ.get("INFO_F5_AUTO_TUNE", "1") not in (
+    "0", "false", "False", "no", "NO",
+)
+ACCESS_MAX_HAMMING_LOOSE = int(os.environ.get("INFO_F5_ACCESS_HAMMING", "4"))
+ACCESS_MAX_HAMMING_TIGHT = 2
+HEADER_MAX_HAMMING = 0
+
+ENABLE_PACKET_WINDOW_RECOVERY = True
+PACKET_WINDOW_PAYLOADS = 8
+FRAME_DEDUP_TTL_S = 2.0
+ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
+    "0", "false", "False", "no", "NO",
+)
+GRC_SCRIPT_PATH = os.environ.get(
+    "INFO_GRC_SCRIPT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio5.py"),
+)
+UDP_WATCHDOG_S = 2.0
+GRC_BOOT_WAIT_S = 3.5
+RECORD_STREAM = os.environ.get("INFO_F5_RECORD", "0") in (
+    "1", "true", "True", "yes", "YES",
+)
+RECORD_PREFIX = "info_f5_record"
+SELF_TEST_ON_START = True
+STAT_INTERVAL_S = 2.0
+IDLE_SLEEP_S = 0.001
+BIT_BUFFER_MAX = 180_000
+SERIAL_BUFFER_MAX = 16_384
+
+# 自适应控制器阈值（均按 STAT_INTERVAL_S 窗口理解）。
+AUTO_COOLDOWN_S = float(os.environ.get("INFO_F5_AUTO_COOLDOWN_S", "6"))
+AUTO_EXPLORE_SILENCE_S = float(os.environ.get("INFO_F5_AUTO_SILENCE_S", "4"))
+AUTO_LOCK_GOOD_WINDOWS = 3
+AUTO_RELOCK_SILENCE_S = 10.0
+UDP_BUSY_BYTES = 20_000
+
+INFO_FREQ_MAP = base.INFO_FREQ_MAP
+INFO_SENSITIVITY = base.INFO_SENSITIVITY
+AC_NORMAL = base.AC_NORMAL
+AC_NORMAL_INT = int(AC_NORMAL, 2)
+ACCESS_MASK = (1 << 64) - 1
+AIR_FRAME_BITS = base.AIR_FRAME_BITS
+AIR_ACCESS_LEN = base.AIR_ACCESS_LEN
+AIR_HEADER_LEN = base.AIR_HEADER_LEN
+AIR_PAYLOAD_LEN = base.AIR_PAYLOAD_LEN
+HEADER_OFFICIAL = base.HEADER_OFFICIAL
+HEADER_OFFICIAL_BITS = base.bytes_to_bits(HEADER_OFFICIAL)
+
+base.ENABLE_GRC_WATCHDOG = ENABLE_GRC_WATCHDOG
+base.GRC_SCRIPT_PATH = GRC_SCRIPT_PATH
+base.UDP_WATCHDOG_S = UDP_WATCHDOG_S
+base.GRC_BOOT_WAIT_S = GRC_BOOT_WAIT_S
+base.RPC_URL = RPC_URL
+
+find_valid_frames = f3.find_valid_frames
+drain_strict_frames = f3.drain_strict_frames
+handle_valid_frame = f3.handle_valid_frame
+f3.FRAME_DEDUP_TTL_S = FRAME_DEDUP_TTL_S
+
+
+class AdaptiveController:
+    """
+    根据 2s 统计窗口决定 RF/FIR 档与 Access 容错。
+
+    状态：
+      explore — 轮换 RUNTIME_TUNES，寻找有效帧
+      locked  — 保持当前档；长时间无帧后重新探索
+    """
+
+    def __init__(self, start_tune: str = "balanced") -> None:
+        if start_tune not in RUNTIME_TUNES:
+            start_tune = "balanced"
+        self.tune_name = start_tune
+        self.tune_index = (
+            AUTO_TUNE_ORDER.index(start_tune)
+            if start_tune in AUTO_TUNE_ORDER
+            else 0
+        )
+        self.state = "explore"
+        self.access_max = ACCESS_MAX_HAMMING_LOOSE
+        self.good_windows = 0
+        self.last_switch_ts = 0.0
+        self.last_action = "init"
+        self.switches = 0
+
+    def _apply_tune(self, node: "InfoDecoderNode", name: str, now: float, reason: str) -> bool:
+        if name not in RUNTIME_TUNES:
+            return False
+        if node.grc_rpc is None:
+            self.last_action = f"skip:{reason}:no_rpc"
+            return False
+        tune = RUNTIME_TUNES[name]
+        try:
+            applied = node.grc_rpc.apply_runtime_tune(
+                name,
+                float(tune["rx_gain_db"]),
+                int(tune["rf_bandwidth_hz"]),
+                float(tune["fir_cutoff_hz"]),
+                float(tune["fir_transition_hz"]),
+            )
+        except Exception as exc:
+            self.last_action = f"fail:{reason}:{exc}"
+            node.get_logger().warn(f"自适应切档失败 {name}: {exc}")
+            return False
+        self.tune_name = str(applied)
+        if self.tune_name in AUTO_TUNE_ORDER:
+            self.tune_index = AUTO_TUNE_ORDER.index(self.tune_name)
+        self.last_switch_ts = now
+        self.switches += 1
+        self.last_action = f"{reason}->{self.tune_name}"
+        node.get_logger().info(
+            f"[f5-auto] {reason} → tune={self.tune_name} "
+            f"gain={tune['rx_gain_db']} BW={tune['rf_bandwidth_hz']/1e3:.0f}k "
+            f"FIR={tune['fir_cutoff_hz']/1e3:.0f}/{tune['fir_transition_hz']/1e3:.0f}k "
+            f"Access≤{self.access_max}"
+        )
+        node._flush_rx_buffers = True
+        return True
+
+    def _next_explore_tune(self) -> str:
+        self.tune_index = (self.tune_index + 1) % len(AUTO_TUNE_ORDER)
+        return AUTO_TUNE_ORDER[self.tune_index]
+
+    def update(
+        self,
+        node: "InfoDecoderNode",
+        stats: dict,
+        *,
+        now: float,
+        silence_s: float,
+        elapsed_s: float,
+    ) -> None:
+        frames = int(stats.get("strict_frames", 0)) + int(
+            stats.get("window_frames", 0)
+        )
+        ac = int(stats.get("ac_hits", 0))
+        header_ok = int(stats.get("header_ok", 0))
+        header_fail = int(stats.get("header_fail", 0))
+        crc16_fail = int(stats.get("crc16_fail", 0))
+        udp_bytes = int(stats.get("udp_bytes", 0))
+
+        # Access 容错本地可调，不依赖 RF RPC。
+        if ac >= 8 and frames == 0 and crc16_fail >= 3:
+            self.access_max = ACCESS_MAX_HAMMING_TIGHT
+        elif ac == 0 and silence_s >= AUTO_EXPLORE_SILENCE_S:
+            self.access_max = ACCESS_MAX_HAMMING_LOOSE
+        elif frames > 0:
+            self.access_max = ACCESS_MAX_HAMMING_LOOSE
+
+        if not ENABLE_AUTO_TUNE or F5_PROFILE != "auto":
+            self.last_action = "rf-auto-disabled"
+            return
+
+        if frames > 0:
+            self.good_windows += 1
+            if self.good_windows >= AUTO_LOCK_GOOD_WINDOWS:
+                self.state = "locked"
+            self.last_action = f"hold:{self.tune_name}:frames={frames}"
+            return
+
+        self.good_windows = 0
+
+        if self.state == "locked":
+            if silence_s < AUTO_RELOCK_SILENCE_S:
+                self.last_action = f"locked-wait:{silence_s:.1f}s"
+                return
+            self.state = "explore"
+            self.last_action = "relock->explore"
+
+        if now - self.last_switch_ts < AUTO_COOLDOWN_S:
+            self.last_action = f"cooldown:{AUTO_COOLDOWN_S - (now - self.last_switch_ts):.1f}s"
+            return
+
+        if silence_s < AUTO_EXPLORE_SILENCE_S:
+            self.last_action = f"observe:{silence_s:.1f}s"
+            return
+
+        # UDP 很忙但完全没有 Access：优先怀疑前端削顶/阻塞。
+        if udp_bytes >= UDP_BUSY_BYTES and ac == 0:
+            if self.tune_name != "desense":
+                self._apply_tune(node, "desense", now, "clipping?")
+                return
+
+        # 有 Access 无 Header：滤波可能过陡或边带被切。
+        if ac >= 4 and header_ok == 0 and header_fail >= ac // 2:
+            target = "wide_fir" if self.tune_name != "wide_fir" else "weak_boost"
+            self._apply_tune(node, target, now, "header-starve")
+            return
+
+        # 有 Header 但帧组不起来：试抬增益或收窄邻道。
+        if header_ok >= 2 and frames == 0:
+            target = "weak_boost" if self.tune_name != "weak_boost" else "narrow"
+            self._apply_tune(node, target, now, "payload-starve")
+            return
+
+        # 通用轮换。
+        nxt = self._next_explore_tune()
+        self._apply_tune(
+            node,
+            nxt,
+            now,
+            f"explore:{elapsed_s:.1f}s/sil={silence_s:.1f}s",
+        )
+
+
+class InfoDecoderNode(base.Node):
+    """保持 f3/f4 的 ROS 接口，节点名改为 info_decoder_f5。"""
+
+    def __init__(self) -> None:
+        super().__init__("info_decoder_f5")
+        self.ally_camp = MY_CAMP
+        self.grc_rpc: Optional[xmlrpc.client.ServerProxy] = None
+        self._flush_rx_buffers = False
+        start_tune = "balanced"
+        if F5_PROFILE == "baseline":
+            start_tune = "open"
+        elif F5_PROFILE == "weak_fixed":
+            start_tune = "weak_boost"
+        self.auto = AdaptiveController(start_tune=start_tune)
+
+        self.pub_pos = self.create_publisher(String, "radio/info/position", 10)
+        self.pub_hp = self.create_publisher(String, "radio/info/hp", 10)
+        self.pub_ammo = self.create_publisher(String, "radio/info/ammo", 10)
+        self.pub_macro = self.create_publisher(String, "radio/info/macro", 10)
+        self.pub_buff = self.create_publisher(String, "radio/info/buff", 10)
+        self.create_subscription(Int8, "/team", self.team_callback, 10)
+
+        self.get_logger().info(
+            f"信息波 f5 启动 | 阵营={self.ally_camp} profile={F5_PROFILE} | "
+            f"auto_tune={ENABLE_AUTO_TUNE} Access≤{ACCESS_MAX_HAMMING_LOOSE}bit | "
+            "Header严格匹配 | 正式话题仅发布 CRC 有效帧"
+        )
+
+    def publish_json(self, publisher, data_dict: dict) -> None:
+        msg = String()
+        msg.data = base.json.dumps(data_dict, ensure_ascii=False)
+        publisher.publish(msg)
+
+    def team_callback(self, msg: Int8) -> None:
+        if msg.data == 0:
+            new_camp = "RED"
+        elif msg.data == 1:
+            new_camp = "BLUE"
+        else:
+            return
+        if new_camp == self.ally_camp:
+            return
+        self.ally_camp = new_camp
+        self.get_logger().info(f"阵营切换 → {new_camp}（听己方基座广播频点）")
+        self.apply_camp_to_radio()
+        self._flush_rx_buffers = True
+
+    def apply_camp_to_radio(self) -> bool:
+        if self.grc_rpc is None:
+            return False
+        freq = INFO_FREQ_MAP[self.ally_camp]
+        try:
+            self.grc_rpc.set_target_freq(freq)
+        except Exception as exc:
+            self.get_logger().error(f"切频失败: {exc}")
+            return False
+        try:
+            self.grc_rpc.set_target_sens(INFO_SENSITIVITY)
+        except Exception as exc:
+            self.get_logger().warn(f"频点已切换，但 Sens RPC 失败: {exc}")
+        # 切频后重新应用当前自适应档，避免只改频点丢掉 RF 设定。
+        tune = RUNTIME_TUNES.get(self.auto.tune_name)
+        if tune is not None:
+            try:
+                self.grc_rpc.apply_runtime_tune(
+                    self.auto.tune_name,
+                    float(tune["rx_gain_db"]),
+                    int(tune["rf_bandwidth_hz"]),
+                    float(tune["fir_cutoff_hz"]),
+                    float(tune["fir_transition_hz"]),
+                )
+            except Exception as exc:
+                self.get_logger().warn(f"切频后恢复 tune 失败: {exc}")
+        self.get_logger().info(
+            f"tx_radio5 已切至 {freq/1e6:.3f}MHz；tune={self.auto.tune_name}"
+        )
+        return True
+
+
+def _fresh_stats(access_max: int) -> dict:
+    return {
+        "ac_hits": 0,
+        "ac_hits_inverted": 0,
+        "access_hamming": {i: 0 for i in range(access_max + 1)},
+        "header_hamming": {i: 0 for i in range(HEADER_MAX_HAMMING + 1)},
+        "header_ok": 0,
+        "header_fail": 0,
+        "crc8_fail": 0,
+        "crc16_fail": 0,
+        "frames_ok": 0,
+        "strict_frames": 0,
+        "window_frames": 0,
+        "dedup_frames": 0,
+        "unknown_cmd": 0,
+        "len_mismatch": 0,
+        "last_polarity": "n/a",
+        "udp_bytes": 0,
+    }
+
+
+def _find_access(
+    bit_buffer: str, access_max: int
+) -> Optional[tuple[int, bool, int]]:
+    if len(bit_buffer) < 64:
+        return None
+    window = int(bit_buffer[:64], 2)
+    last_start = len(bit_buffer) - 64
+    for offset in range(last_start + 1):
+        normal_distance = (window ^ AC_NORMAL_INT).bit_count()
+        if normal_distance <= access_max:
+            return offset, False, normal_distance
+        inverted_distance = 64 - normal_distance
+        if inverted_distance <= access_max:
+            return offset, True, inverted_distance
+        if offset < last_start:
+            window = ((window << 1) & ACCESS_MASK) | (
+                bit_buffer[offset + 64] == "1"
+            )
+    return None
+
+
+def _header_hamming(header_bits: str) -> int:
+    return base.hamming(header_bits, HEADER_OFFICIAL_BITS)
+
+
+def extract_air_payloads(
+    bit_buffer: str, stats: dict, access_max: int
+) -> tuple[str, list[bytes]]:
+    payloads: list[bytes] = []
+    while len(bit_buffer) >= AIR_FRAME_BITS:
+        found = _find_access(bit_buffer, access_max)
+        if found is None:
+            bit_buffer = bit_buffer[-63:]
+            break
+
+        start, inverted, access_distance = found
+        if len(bit_buffer) < start + AIR_FRAME_BITS:
+            bit_buffer = bit_buffer[start:]
+            break
+
+        raw_bits = bit_buffer[start:start + AIR_FRAME_BITS]
+        frame_bits = base.invert_bits(raw_bits) if inverted else raw_bits
+        header_start = AIR_ACCESS_LEN * 8
+        header_end = header_start + AIR_HEADER_LEN * 8
+        header_distance = _header_hamming(frame_bits[header_start:header_end])
+
+        stats["ac_hits"] += 1
+        stats["access_hamming"].setdefault(access_distance, 0)
+        stats["access_hamming"][access_distance] += 1
+        if inverted:
+            stats["ac_hits_inverted"] += 1
+
+        if header_distance <= HEADER_MAX_HAMMING:
+            frame_bytes = base.bits_to_bytes(frame_bits)
+            payloads.append(
+                frame_bytes[
+                    AIR_ACCESS_LEN + AIR_HEADER_LEN:
+                    AIR_ACCESS_LEN + AIR_HEADER_LEN + AIR_PAYLOAD_LEN
+                ]
+            )
+            stats["header_ok"] += 1
+            stats["header_hamming"].setdefault(header_distance, 0)
+            stats["header_hamming"][header_distance] += 1
+            stats["last_polarity"] = "inverted" if inverted else "normal"
+            bit_buffer = bit_buffer[start + AIR_FRAME_BITS:]
+        else:
+            stats["header_fail"] += 1
+            bit_buffer = bit_buffer[start + 1:]
+    return bit_buffer, payloads
+
+
+def _build_test_round(seq_start: int) -> bytes:
+    pos = struct.pack("<12H", 100, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    hp = struct.pack("<6H", 2000, 500, 800, 800, 0, 600)
+    ammo = struct.pack("<5H", 150, 450, 400, 500, 800)
+    macro = struct.pack("<HHI", 350, 1200, 256)
+    buff = bytearray(41)
+    buff[35] = 4
+    return b"".join(
+        (
+            base.build_referee_frame(0x0A01, pos, seq_start + 0),
+            base.build_referee_frame(0x0A02, hp, seq_start + 1),
+            base.build_referee_frame(0x0A03, ammo, seq_start + 2),
+            base.build_referee_frame(0x0A04, macro, seq_start + 3),
+            base.build_referee_frame(0x0A05, bytes(buff), seq_start + 4),
+        )
+    )
+
+
+def _wrap_continuous_air_bits(serial_stream: bytes) -> str:
+    if len(serial_stream) % AIR_PAYLOAD_LEN:
+        raise ValueError("连续流测试必须在整体末尾恰好落在 15B 边界")
+    packets = []
+    for offset in range(0, len(serial_stream), AIR_PAYLOAD_LEN):
+        packets.append(
+            bytes.fromhex(base.ACCESS_CODE_HEX)
+            + HEADER_OFFICIAL
+            + serial_stream[offset:offset + AIR_PAYLOAD_LEN]
+        )
+    return "".join(base.bytes_to_bits(packet) for packet in packets)
+
+
+def _flip_bits(bits: str, positions: tuple[int, ...]) -> str:
+    changed = list(bits)
+    for position in positions:
+        changed[position] = "1" if changed[position] == "0" else "0"
+    return "".join(changed)
+
+
+def run_self_test(node: InfoDecoderNode) -> bool:
+    """纯内存测试；不调用 publisher，不污染正式 ROS 话题。"""
+    node.get_logger().info("==== f5 纯内存自检开始 ====")
+    rounds = b"".join(_build_test_round(index * 5) for index in range(3))
+    if len(rounds) != 420:
+        node.get_logger().error(f"连续三轮长度错误: {len(rounds)}B，应为420B")
+        return False
+
+    clean_bits = _wrap_continuous_air_bits(rounds)
+    access_damaged = _flip_bits(clean_bits, (3, 20, 41, 55))
+
+    stats = _fresh_stats(ACCESS_MAX_HAMMING_LOOSE)
+    remain, payloads = extract_air_payloads(
+        access_damaged, stats, ACCESS_MAX_HAMMING_LOOSE
+    )
+    extracted = b"".join(payloads)
+    access_ok = len(payloads) == 28 and not remain and extracted == rounds
+
+    second_header = AIR_FRAME_BITS + 64
+    header_damaged = _flip_bits(clean_bits, (second_header,))
+    header_stats = _fresh_stats(ACCESS_MAX_HAMMING_LOOSE)
+    header_remain, header_payloads = extract_air_payloads(
+        header_damaged, header_stats, ACCESS_MAX_HAMMING_LOOSE
+    )
+    expected_without_second_payload = rounds[:15] + rounds[30:]
+    strict_header_ok = (
+        len(header_payloads) == 27
+        and not header_remain
+        and b"".join(header_payloads) == expected_without_second_payload
+        and header_stats["header_fail"] == 1
+    )
+
+    # 自适应：假同步迹象应收紧 Access。
+    fake_stats = {
+        "ac_hits": 12,
+        "strict_frames": 0,
+        "window_frames": 0,
+        "crc16_fail": 5,
+        "header_ok": 0,
+        "header_fail": 0,
+        "udp_bytes": 1000,
+    }
+    ctrl = AdaptiveController("balanced")
+    ctrl.access_max = ACCESS_MAX_HAMMING_LOOSE
+    ctrl.update(
+        node,
+        fake_stats,
+        now=time.time(),
+        silence_s=1.0,
+        elapsed_s=2.0,
+    )
+    access_adapt_ok = ctrl.access_max == ACCESS_MAX_HAMMING_TIGHT
+
+    strict_stats = _fresh_stats(ACCESS_MAX_HAMMING_LOOSE)
+    strict_frames = drain_strict_frames(bytearray(extracted), strict_stats)
+    window_frames = find_valid_frames(extracted)
+    cmd_ids = [struct.unpack_from("<H", frame, 5)[0] for frame in strict_frames]
+    frame_ok = (
+        len(strict_frames) == 15
+        and len(window_frames) == 15
+        and cmd_ids.count(0x0A05) == 3
+    )
+    ok = access_ok and strict_header_ok and frame_ok and access_adapt_ok
+
+    node.get_logger().info(
+        f"自检 连续切片={'通过' if access_ok else '失败'} "
+        f"严格Header={'通过' if strict_header_ok else '失败'} "
+        f"15帧/0x0A05={'通过' if frame_ok else '失败'} "
+        f"Access自适应={'通过' if access_adapt_ok else '失败'}"
+    )
+    node.get_logger().info(
+        "==== f5 纯内存自检结束：%s ====" % ("全部通过 OK" if ok else "存在失败 FAIL")
+    )
+    return ok
+
+
+def connect_grc(node: InfoDecoderNode) -> None:
+    try:
+        node.grc_rpc = xmlrpc.client.ServerProxy(RPC_URL, allow_none=True)
+        if node.apply_camp_to_radio():
+            node.get_logger().info(f"XMLRPC 连接正常: {RPC_URL}")
+            try:
+                backend = node.grc_rpc.get_clock_backend()
+                node.get_logger().info(f"tx_radio5 时钟后端={backend}")
+            except Exception:
+                pass
+        else:
+            node.get_logger().error("XMLRPC 调用失败，请先启动 tx_radio5.py")
+    except Exception as exc:
+        node.get_logger().error(f"无法连接 XMLRPC({RPC_URL}): {exc}")
+
+
+def main() -> None:
+    rclpy.init()
+    node = InfoDecoderNode()
+
+    if SELF_TEST_ON_START and not run_self_test(node):
+        node.get_logger().error("f5 离线自检未通过，请勿直接用于赛场！")
+
+    # 自检会暂时关掉 auto 动作里的切档；确保环境变量下 auto 仍按配置启用。
+    os.environ.setdefault("INFO_F5_PROFILE", F5_PROFILE)
+
+    if ENABLE_GRC_WATCHDOG:
+        # 让 GRC 子进程继承同一 profile。
+        os.environ["INFO_F5_PROFILE"] = F5_PROFILE
+        base.restart_grc(node)
+    else:
+        connect_grc(node)
+
+    file_recorder = None
+    if RECORD_STREAM:
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"{RECORD_PREFIX}_{node.ally_camp}_{stamp}.txt"
+        try:
+            file_recorder = open(path, "w", encoding="utf-8")
+            node.get_logger().info(f"比特录制: {path}")
+        except OSError as exc:
+            node.get_logger().error(f"录制文件打开失败: {exc}")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setblocking(False)
+    try:
+        sock.bind((UDP_IP, UDP_PORT))
+    except OSError as exc:
+        node.get_logger().error(f"UDP 绑定 {UDP_IP}:{UDP_PORT} 失败: {exc}")
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    bit_buffer = ""
+    serial_buffer = bytearray()
+    packet_window: deque[bytes] = deque(maxlen=PACKET_WINDOW_PAYLOADS)
+    dedupe: dict[tuple[int, int, int], float] = {}
+    packet_counter = {
+        key: 0 for key in ("0x0A01", "0x0A02", "0x0A03", "0x0A04", "0x0A05")
+    }
+    stats = _fresh_stats(node.auto.access_max)
+    last_stat = time.time()
+    last_udp = time.time()
+    last_valid_frame = time.time()
+
+    node.get_logger().info(
+        f"监听 {UDP_IP}:{UDP_PORT} | GRC={GRC_SCRIPT_PATH} | "
+        f"profile={F5_PROFILE} tune={node.auto.tune_name}"
+    )
+
+    try:
+        while rclpy.ok():
+            now = time.time()
+            if node._flush_rx_buffers:
+                node._flush_rx_buffers = False
+                bit_buffer = ""
+                serial_buffer.clear()
+                packet_window.clear()
+                dedupe.clear()
+
+            if ENABLE_GRC_WATCHDOG and now - last_udp > UDP_WATCHDOG_S:
+                node.get_logger().warn("UDP 断流，重启 tx_radio5…")
+                os.environ["INFO_F5_PROFILE"] = F5_PROFILE
+                base.restart_grc(node)
+                last_udp = time.time()
+                bit_buffer = ""
+                serial_buffer.clear()
+                packet_window.clear()
+                dedupe.clear()
+                # 重启后把当前自适应档重新打上去。
+                tune = RUNTIME_TUNES.get(node.auto.tune_name)
+                if node.grc_rpc is not None and tune is not None:
+                    try:
+                        node.grc_rpc.apply_runtime_tune(
+                            node.auto.tune_name,
+                            float(tune["rx_gain_db"]),
+                            int(tune["rf_bandwidth_hz"]),
+                            float(tune["fir_cutoff_hz"]),
+                            float(tune["fir_transition_hz"]),
+                        )
+                    except Exception as exc:
+                        node.get_logger().warn(f"重启后恢复 tune 失败: {exc}")
+
+            if now - last_stat >= STAT_INTERVAL_S:
+                elapsed = max(0.001, now - last_stat)
+                silence = now - last_valid_frame
+                rates = " ".join(
+                    f"{key}={count/elapsed:.1f}Hz"
+                    for key, count in packet_counter.items()
+                )
+                access_cap = node.auto.access_max
+                access_hist = "/".join(
+                    str(stats["access_hamming"].get(i, 0))
+                    for i in range(access_cap + 1)
+                )
+                node.auto.update(
+                    node,
+                    stats,
+                    now=now,
+                    silence_s=silence,
+                    elapsed_s=elapsed,
+                )
+                node.get_logger().info(
+                    f"[f5 {F5_PROFILE}/{node.auto.tune_name} "
+                    f"{node.auto.state} {elapsed:.1f}s] {rates} | "
+                    f"AC0..{access_cap}={access_hist} "
+                    f"Header={stats['header_ok']}/{stats['header_fail']} "
+                    f"CRC8/16={stats['crc8_fail']}/{stats['crc16_fail']} "
+                    f"strict/window={stats['strict_frames']}/{stats['window_frames']} "
+                    f"无有效帧={silence:.1f}s UDP={stats['udp_bytes']} | "
+                    f"auto={node.auto.last_action}"
+                )
+                packet_counter = {key: 0 for key in packet_counter}
+                polarity = stats["last_polarity"]
+                stats = _fresh_stats(node.auto.access_max)
+                stats["last_polarity"] = polarity
+                last_stat = now
+                if file_recorder is not None:
+                    file_recorder.flush()
+
+            got_udp = False
+            try:
+                while True:
+                    data, _ = sock.recvfrom(16384)
+                    got_udp = True
+                    last_udp = time.time()
+                    stats["udp_bytes"] += len(data)
+                    incoming = "".join("1" if byte else "0" for byte in data)
+                    bit_buffer += incoming
+                    if file_recorder is not None:
+                        file_recorder.write(incoming + "\n")
+            except BlockingIOError:
+                pass
+
+            if len(bit_buffer) > BIT_BUFFER_MAX:
+                bit_buffer = bit_buffer[-BIT_BUFFER_MAX:]
+
+            bit_buffer, new_payloads = extract_air_payloads(
+                bit_buffer, stats, node.auto.access_max
+            )
+            if new_payloads:
+                packet_window.extend(new_payloads)
+                serial_buffer.extend(b"".join(new_payloads))
+                if len(serial_buffer) > SERIAL_BUFFER_MAX:
+                    del serial_buffer[:-SERIAL_BUFFER_MAX]
+
+            published = False
+            for frame in drain_strict_frames(serial_buffer, stats):
+                published = (
+                    handle_valid_frame(
+                        frame, "strict", node, packet_counter, stats, dedupe, now
+                    )
+                    or published
+                )
+
+            if ENABLE_PACKET_WINDOW_RECOVERY and new_payloads:
+                for frame in find_valid_frames(b"".join(packet_window)):
+                    published = (
+                        handle_valid_frame(
+                            frame, "window", node, packet_counter, stats, dedupe, now
+                        )
+                        or published
+                    )
+            if published:
+                last_valid_frame = now
+
+            rclpy.spin_once(node, timeout_sec=0.0)
+            if not got_udp:
+                time.sleep(IDLE_SLEEP_S)
+    except KeyboardInterrupt:
+        node.get_logger().info("中断退出")
+    finally:
+        if base._grc_process is not None:
+            base._kill_grc_tree(base._grc_process)
+        if file_recorder is not None:
+            file_recorder.flush()
+            file_recorder.close()
+        sock.close()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
