@@ -65,11 +65,14 @@ BIAS_ALPHA = 1e-5
 # =============================================================================
 
 BOOT_PROFILES = {
+    # 信息波 Carson 带宽是 ±270kHz（h=23.4 的宽带 FSK），cutoff 必须比它大，
+    # 否则一开机就在削自己的边带。过渡带保持 20kHz 让阻带在 295kHz 起，
+    # 压住三级干扰。完整推导见 tx_radio6_tunes.py 里的注释。
     "auto": {
-        "rf_bandwidth_hz": 600_000,
+        "rf_bandwidth_hz": 700_000,
         "rx_gain_db": 35.0,
-        "fir_cutoff_hz": 260_000.0,
-        "fir_transition_hz": 60_000.0,
+        "fir_cutoff_hz": 275_000.0,
+        "fir_transition_hz": 20_000.0,
         "fir_window": "blackman_harris",
         "complex_dc_length": 32,
         "gain_mu": 0.175,

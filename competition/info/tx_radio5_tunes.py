@@ -37,7 +37,23 @@ BOOT_PROFILE = "auto"
 # =============================================================================
 
 # 只含可热切换字段。判决域 DC / 平滑 / gain_mu 属于启动拓扑，不在此表。
+#
+# ---- 关于 fir_cutoff：信息波比想象中宽得多 ----
+# 符号率 = 1MHz/47 = 21.28kHz，峰值频偏 = 1.5628*1MHz/2π = 248.7kHz，
+# 调制指数 h = 2*248.7/21.28 = 23.4，Carson 带宽 = ±270kHz。
+# 沿用已久的 260kHz cutoff 其实比信号本身还窄 10kHz，一直在削自己的边带。
+#
+# 红方 433.200MHz 接收时，干扰波折算到基带占：一级 -1470~-530kHz、
+# 二级 -1130~-270kHz、三级 -525~-275kHz。二/三级和信息波几乎零间隔，
+# 滤波器分不开，只能靠 Access/Header/CRC 挡。所以 full_band 用
+# 275kHz cutoff + 20kHz 过渡带（阻带 295kHz 起）：收全信息波，同时压住三级。
 RUNTIME_TUNES = {
+    "full_band": {
+        "rf_bandwidth_hz": 700_000,
+        "rx_gain_db": 45.0,
+        "fir_cutoff_hz": 275_000.0,
+        "fir_transition_hz": 20_000.0,
+    },
     "balanced": {
         "rf_bandwidth_hz": 600_000,
         "rx_gain_db": 35.0,
@@ -89,8 +105,10 @@ RUNTIME_TUNES = {
     },
 }
 
-# 无有效帧时的探索顺序：先沿增益阶梯往上爬，再换滤波器形状。
+# 无有效帧时的探索顺序：先保证带宽够（full_band），再沿增益阶梯往上爬，
+# 最后才换滤波器形状。带宽不够时加增益没用——被削掉的边带不会因为放大而回来。
 AUTO_TUNE_ORDER = (
+    "full_band",
     "balanced",
     "weak_boost",
     "high_gain",

@@ -29,11 +29,12 @@ from __future__ import annotations
 # =============================================================================
 
 # 用哪个档？可选值见下面 PROFILES 的键：
-#   "weak_antijam" 弱信号抗干扰（默认，与 f3 balanced 逐字段对齐）
+#   "full_band"    默认。滤波器开到信息波真实带宽 ±270kHz，弱信号先试它
+#   "weak_antijam" 与 f3 balanced 逐字段对齐，用来做 A/B 对照
 #   "high_gain"    同上但增益 50dB，频谱整体偏低时先试这个
 #   "soft_lock"    旧版激进参数，仅排查用，正常比赛不要用
 #   "baseline"     接近 f3 基线，用来确认有没有退步
-PROFILE = "weak_antijam"
+PROFILE = "full_band"
 
 # 只想单独扫增益时改这里（单位 dB，范围 0~70）。
 # 填 None 表示用上面档位里自带的增益。
@@ -47,7 +48,11 @@ RX_GAIN_OVERRIDE = None
 # 字段含义（小白版）：
 #   rf_bandwidth_hz      Pluto 模拟前端带宽，越窄越能挡住邻道干扰
 #   rx_gain_db           Pluto 接收增益，弱信号的第一旋钮
-#   fir_cutoff_hz        数字低通截止频率，信息波占用约 ±260kHz
+#   fir_cutoff_hz        数字低通截止频率。信息波真正占用 ±270kHz：
+#                        符号率 1MHz/47=21.28kHz，峰值频偏 1.5628*1MHz/2π
+#                        =248.7kHz，调制指数 h=23.4，Carson 带宽 ±270kHz。
+#                        沿用已久的 260kHz 比信号还窄，一直在削边带，
+#                        弱信号先死在这里 —— 见 "full_band" 档
 #   fir_transition_hz    滤波器过渡带，越窄越陡但阶数越高、群延迟越大
 #   fir_window           窗函数，blackman_harris 阻带更深（更抗干扰）
 #   complex_dc_length    复数域直流阻塞长度，去掉 Pluto 的本振泄漏
@@ -60,6 +65,23 @@ RX_GAIN_OVERRIDE = None
 #                        置 0 等于让环路自己硬拉，弱信号下更难锁
 #   omega_relative_limit 码元周期允许的相对漂移范围
 PROFILES = {
+    # 与 weak_antijam 只差滤波器：cutoff 开到 275kHz 收全 ±270kHz 的信息波，
+    # 过渡带保持 20kHz（阻带 295kHz 起）把三级干扰（上边沿 -275kHz）压住。
+    # 二级干扰上边沿正好在 -270kHz，和信息波零间隔，滤波器分不开，
+    # 那种场景只能靠 Access/Header/CRC 三道闸门。
+    "full_band": {
+        "rf_bandwidth_hz": 700_000,
+        "rx_gain_db": 45.0,
+        "fir_cutoff_hz": 275_000.0,
+        "fir_transition_hz": 20_000.0,
+        "fir_window": "blackman_harris",
+        "complex_dc_length": 32,
+        "post_demod_dc_length": 0,
+        "smooth_samples": 1,
+        "gain_mu": 0.175,
+        "freq_error": 0.0048,
+        "omega_relative_limit": 0.005,
+    },
     "weak_antijam": {
         "rf_bandwidth_hz": 600_000,
         "rx_gain_db": 35.0,

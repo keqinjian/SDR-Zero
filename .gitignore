@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# tx_radio6.py 的 IQ_RECORD_PATH 录出来的原始采样，动辄上百 MB
+*.iq
+*.cfile
