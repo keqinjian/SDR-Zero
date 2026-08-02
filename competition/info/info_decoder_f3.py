@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-info_decoder_f3.py —— 信息波抗干扰解码器（给无线电小白的说明）
+info_decoder_f3.py —— 信息波抗干扰解码器
 ================================================================
 
-【一句话】把天线收到的“哔哔声”变成位置/血量等比赛数据，并发布到 ROS。
 
-【整条链路像寄信】
+
+
   官方基座发射机（很弱的信息波，约 -40～-60 dBm）
        │  用 GFSK 把 0/1 调制到 433 MHz 附近
        ▼
@@ -20,7 +20,7 @@ info_decoder_f3.py —— 信息波抗干扰解码器（给无线电小白的说
        ▼
   ROS 话题 radio/info/{position,hp,ammo,macro,buff}
 
-【小词典】
+
   - SPS=47：每个比特占 47 个采样点（官方 V2 规定，不能改错）
   - Sensitivity：解调器“灵敏度”旋钮，官方信息波为 1.5628
   - Access Code：64 位“暗号”，用来对齐包头（信息波与干扰波暗号不同）
@@ -35,8 +35,13 @@ info_decoder_f3.py —— 信息波抗干扰解码器（给无线电小白的说
   3) 统一去重 + 每几秒打一次 Hz 统计，方便调参
 
 【怎么启动】
-  INFO_ANTIJAM_PROFILE=balanced python3 competition/info/info_decoder_f3.py
-  物理层档位在 tx_radio2.py：baseline / balanced / strong（别一次改满）
+  python3 competition/info/info_decoder_f3.py
+  就这一条命令，不需要任何环境变量。它会自动拉起 tx_radio2.py。
+
+【要调参改哪里】
+  - 用哪个射频档（baseline / balanced / strong）→ tx_radio2_tunes.py
+  - 各档的带宽/增益/滤波器数值 → tx_radio2.py 的 ANTIJAM_PROFILES
+  - 协议与运行方式 → 本文件下面的调参面板
 """
 
 from __future__ import annotations
@@ -54,18 +59,19 @@ import rclpy
 from std_msgs.msg import Int8, String
 
 import info_decoder_f1 as base
+from tx_radio2_tunes import ANTIJAM_PROFILE
 
 
 # =============================================================================
-# ★★★★★ 现场优先只改这里（其它常量多半对齐官方，别乱动）★★★★★
+# ★★★★★ 调参面板：现场优先只改这里（其它常量多半对齐官方，别乱动）★★★★★
+#
+# 直接 `python3 competition/info/info_decoder_f3.py` 启动，不需要任何环境变量。
+# 射频档位（带宽 / 增益 / FIR）不在本文件，见上面文档里的说明。
 # =============================================================================
 MY_CAMP = "RED"  # 默认己方颜色；运行中 /team: 0=红, 1=蓝 会覆盖
 UDP_IP = "127.0.0.1"          # 本机收比特
 UDP_PORT = 14346              # 与 tx_radio2 发送端口一致（信息波）
 RPC_URL = "http://127.0.0.1:8081"  # 遥控 GNU Radio 切频/改参数
-
-# 与 tx_radio2.py 共用：决定射频带宽、增益、滤波器“松紧”
-ANTIJAM_PROFILE = os.environ.get("INFO_ANTIJAM_PROFILE", "balanced").strip().lower()
 
 # Access 容错：2 = 64 位暗号最多错 2 位仍算找到包头；Header 仍必须完全正确
 ENABLE_FULL_ACCESS_HAMMING = True
@@ -76,13 +82,11 @@ ENABLE_PACKET_WINDOW_RECOVERY = True
 PACKET_WINDOW_PAYLOADS = 8       # 8×15B，够盖住最长 0x0A05 及边界
 FRAME_DEDUP_TTL_S = 2.0          # 同一帧 2 秒内不重复发布
 
-# 看门狗：UDP 一段时间没数据就重启 GNU Radio（mock 调试可设环境变量关掉）
-ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-GRC_SCRIPT_PATH = os.environ.get(
-    "INFO_GRC_SCRIPT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio2.py"),
+# 看门狗：True 时本程序会自动拉起 tx_radio2.py，并在 UDP 断流时重启它。
+# 想手动分两个终端跑（比如要盯频谱窗），改成 False，然后自己先跑 tx_radio2.py。
+ENABLE_GRC_WATCHDOG = True
+GRC_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio2.py"
 )
 UDP_WATCHDOG_S = 2.0
 GRC_BOOT_WAIT_S = 3.0

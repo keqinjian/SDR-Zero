@@ -7,16 +7,17 @@ tx_radio4.py —— 信息波 f4 的 GNU Radio 接收入口（小白说明）
 本文件只负责“收音机”：Pluto 收 433MHz → 鉴频/时钟 → 把 0/1 经 UDP 14346 送给
 info_decoder_f4.py。协议解析不在这里做。
 
-环境变量 INFO_F4_PROFILE：
-  weak_antijam — 弱信号抗干扰（默认）
-  baseline     — 接近 f3 基线，用来对比有没有退步
+【怎么启动】平时不用单独跑它，`python3 info_decoder_f4.py` 会自动把它拉起来。
+            要单独看频谱窗时才：`python3 tx_radio4.py`
 
-官方空口旋钮固定：SPS=47，Sensitivity=1.5628，采样率 1MHz。
+【要调档位/增益】改 tx_radio4_tunes.py，不要改这里，也不需要任何环境变量。
+【要调下面这些】Pluto 地址、频点、UDP/RPC 端口，就在本文件的调参面板里改。
+
+官方空口旋钮固定：SPS=47，Sensitivity=1.5628，采样率 1MHz，任何时候都不要动。
 """
 
 from __future__ import annotations
 
-import os
 import signal
 import sys
 from distutils.version import StrictVersion
@@ -24,10 +25,15 @@ from distutils.version import StrictVersion
 from PyQt5 import Qt
 
 from tx_radio4_flow import tx_radio4_flow
+import tx_radio4_tunes
 
 
-PROFILE = os.environ.get("INFO_F4_PROFILE", "weak_antijam").strip().lower()
+# =============================================================================
+# ★★★★★ 调参面板（射频档位在 tx_radio4_tunes.py）★★★★★
+# =============================================================================
 
+# 红方 433.2MHz；蓝方 433.92MHz。解码器会根据 /team 话题自动切频，
+# 这里只是没连解码器、单独跑本文件时的初始频点。
 PLUTO_URI = "ip:192.168.3.1"
 TARGET_FREQ_HZ = 433_200_000
 SAMPLE_RATE_HZ = 1_000_000
@@ -36,45 +42,11 @@ SENSITIVITY = 1.5628
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
 RPC_PORT = 8081
+# =============================================================================
 
-# baseline 与 f3 基线一致；weak_antijam 只调整接收机，不改变任何空口参数。
-# 判决域 DC blocker 会把超过其延迟长度的连续码元当作直流消除；
-# 固定 Header 含 12 个连续 0，因此正式 profile 中保持关闭。
-PROFILES = {
-    "baseline": {
-        "rf_bandwidth_hz": 1_000_000,
-        "rx_gain_db": 45.0,
-        "fir_cutoff_hz": 300_000.0,
-        "fir_transition_hz": 50_000.0,
-        "fir_window": "hamming",
-        "complex_dc_length": 0,
-        "post_demod_dc_length": 0,
-        "smooth_samples": 1,
-        "gain_mu": 0.175,
-        "freq_error": 0.0048,
-        "omega_relative_limit": 0.005,
-    },
-    "weak_antijam": {
-        "rf_bandwidth_hz": 600_000,
-        "rx_gain_db": 40.0,
-        "fir_cutoff_hz": 260_000.0,
-        "fir_transition_hz": 20_000.0,
-        "fir_window": "blackman_harris",
-        "complex_dc_length": 32,
-        "post_demod_dc_length": 0,
-        "smooth_samples": 5,
-        "gain_mu": 0.10,
-        "freq_error": 0.0,
-        "omega_relative_limit": 0.01,
-    },
-}
-
-
-def selected_profile() -> dict:
-    if PROFILE not in PROFILES:
-        choices = ", ".join(sorted(PROFILES))
-        raise SystemExit(f"未知 INFO_F4_PROFILE={PROFILE!r}；可选：{choices}")
-    return dict(PROFILES[PROFILE])
+# 档位表和"用哪个档"都在 tx_radio4_tunes.py，解码器也读同一份，不会两边打架。
+PROFILE = tx_radio4_tunes.PROFILE
+selected_profile = tx_radio4_tunes.selected_profile
 
 
 def build_flowgraph(profile: dict) -> tx_radio4_flow:
@@ -116,6 +88,10 @@ def main() -> None:
         f"平滑={profile['smooth_samples']} | UDP={UDP_IP}:{UDP_PORT}"
     )
     print("若 raw IQ 顶平，数字处理无法恢复：应降低 gain 或增加模拟滤波。")
+    print(
+        "反之，若频谱图整体压在 -55dBFS 以下且看不到削顶，说明增益不足、"
+        "信号淹在量化噪声里：改 tx_radio4_tunes.RX_GAIN_OVERRIDE 往上加 5~10dB 再看。"
+    )
     print("=" * 72)
 
     if StrictVersion("4.5.0") <= StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):

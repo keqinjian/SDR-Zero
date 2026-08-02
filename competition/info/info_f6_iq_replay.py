@@ -9,7 +9,9 @@ f6 IQ 离线回放（SPS=47）。
 不依赖 GNU Radio；用于区分“前端已坏”与“协议层丢包”。
 用法：
   python3 competition/info/info_f6_iq_replay.py recording.c64
-  INFO_F6_IQ_REPLAY_MAX=2000000 python3 ... recording.c64
+  只看前面一段（文件很大时）：加 --max-samples 2000000
+
+录波怎么来：把 tx_radio6.py 里的 IQ_RECORD_PATH 改成一个路径再跑一次。
 """
 
 from __future__ import annotations
@@ -50,7 +52,8 @@ SPS = 47
 SENSITIVITY = 1.5628
 BT = 0.35
 SAMPLE_RATE = 1_000_000
-BIAS_ALPHA = float(os.environ.get("INFO_F6_BIAS_ALPHA", "1e-5"))
+# 要和录波时 tx_radio6.py 里的 BIAS_ALPHA 保持一致，否则离线结果对不上在线。
+BIAS_ALPHA = 1e-5
 
 
 def read_c64(path: Path, max_samples: int | None) -> list[complex]:
@@ -129,8 +132,8 @@ def main() -> int:
     parser.add_argument(
         "--max-samples",
         type=int,
-        default=int(os.environ.get("INFO_F6_IQ_REPLAY_MAX", "0") or 0) or None,
-        help="最多读取的复数采样数；0 表示全部",
+        default=None,
+        help="最多读取的复数采样数；不填表示全部",
     )
     args = parser.parse_args()
     if not args.iq_path.is_file():

@@ -7,13 +7,15 @@ tx_radio5.py —— 信息波 f5 接收入口（小白说明）
 收音机侧：优先 symbol_sync 时钟恢复；解码器可通过 XMLRPC 热切换
 RF 带宽/增益/FIR（档位表在 tx_radio5_tunes.py）。
 
-INFO_F5_PROFILE=auto|baseline|weak_fixed
-空口参数仍固定 SPS=47 / Sens=1.5628。与 info_decoder_f5 配对使用。
+【怎么启动】平时不用单独跑它，`python3 info_decoder_f5.py` 会自动把它拉起来。
+            要单独看频谱窗时才：`python3 tx_radio5.py`
+
+【要调档位】改 tx_radio5_tunes.py，不需要任何环境变量。
+空口参数仍固定 SPS=47 / Sens=1.5628，任何时候都不要动。
 """
 
 from __future__ import annotations
 
-import os
 import signal
 import sys
 from distutils.version import StrictVersion
@@ -21,11 +23,15 @@ from distutils.version import StrictVersion
 from PyQt5 import Qt
 
 from tx_radio5_flow import tx_radio5_flow
-from tx_radio5_tunes import AUTO_TUNE_ORDER, RUNTIME_TUNES
+from tx_radio5_tunes import AUTO_TUNE_ORDER, BOOT_PROFILE, RUNTIME_TUNES
 
 
-PROFILE = os.environ.get("INFO_F5_PROFILE", "auto").strip().lower()
+# 开机拓扑选哪个：唯一来源是 tx_radio5_tunes.BOOT_PROFILE，解码器读的是同一份。
+PROFILE = BOOT_PROFILE
 
+# =============================================================================
+# ★★★★★ 调参面板（射频档位在 tx_radio5_tunes.py）★★★★★
+# =============================================================================
 PLUTO_URI = "ip:192.168.3.1"
 TARGET_FREQ_HZ = 433_200_000
 SAMPLE_RATE_HZ = 1_000_000
@@ -34,6 +40,7 @@ SENSITIVITY = 1.5628
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
 RPC_PORT = 8081
+# =============================================================================
 
 # 启动时解调拓扑参数（symbol_sync 等）；运行时 RF/FIR 由 RUNTIME_TUNES 切换。
 # auto 仅选择启动拓扑，真正现场适配由 info_decoder_f5 的控制器完成。
@@ -89,7 +96,9 @@ BOOT_PROFILES = {
 def selected_boot_profile() -> dict:
     if PROFILE not in BOOT_PROFILES:
         choices = ", ".join(sorted(BOOT_PROFILES))
-        raise SystemExit(f"未知 INFO_F5_PROFILE={PROFILE!r}；可选：{choices}")
+        raise SystemExit(
+            f"tx_radio5_tunes.BOOT_PROFILE={PROFILE!r} 不认识；可选：{choices}"
+        )
     return dict(BOOT_PROFILES[PROFILE])
 
 

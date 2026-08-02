@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import os
 import signal
 import sys
 from distutils.version import StrictVersion
@@ -18,22 +17,16 @@ from distutils.version import StrictVersion
 from PyQt5 import Qt
 
 from tx_radio2_flow import tx_radio2_flow
+from tx_radio2_tunes import ANTIJAM_PROFILE
 
 
 # =============================================================================
 # ★★★★★ 抗干扰参数调试区（现场优先只改这里）★★★★★
 # =============================================================================
 #
-# 可选档位：
-#   baseline：等同现有 tx_radio.py，用于确认 f3 没有引入性能回退。
-#   balanced：首选抗干扰档；先缩模拟带宽，再用陡峭 FIR 压制二/三级邻道。
-#   strong  ：强干扰实验档；带宽和增益更激进，无干扰时也必须复测 10 Hz。
+# 用哪个档？改 tx_radio2_tunes.py 里的 ANTIJAM_PROFILE，解码器读的是同一份，
+# 不需要任何环境变量。下面 ANTIJAM_PROFILES 是各档的具体数值。
 #
-# 也可在启动前设置：
-#   INFO_ANTIJAM_PROFILE=balanced python3 competition/info/tx_radio2.py
-#
-ANTIJAM_PROFILE = os.environ.get("INFO_ANTIJAM_PROFILE", "balanced").strip().lower()
-
 PLUTO_URI = "ip:192.168.3.1"  # SDR-B：信息波接收机
 TARGET_FREQ_HZ = 433_200_000   # 默认红方；f3 会按 /team 通过 RPC 覆盖
 SAMPLE_RATE_HZ = 1_000_000
@@ -80,7 +73,8 @@ def _selected_profile() -> dict:
     if ANTIJAM_PROFILE not in ANTIJAM_PROFILES:
         choices = ", ".join(sorted(ANTIJAM_PROFILES))
         raise SystemExit(
-            f"未知 INFO_ANTIJAM_PROFILE={ANTIJAM_PROFILE!r}；可选：{choices}"
+            f"tx_radio2_tunes.ANTIJAM_PROFILE={ANTIJAM_PROFILE!r} 不认识；"
+            f"可选：{choices}"
         )
     return dict(ANTIJAM_PROFILES[ANTIJAM_PROFILE])
 

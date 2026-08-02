@@ -8,14 +8,17 @@ tx_radio6.py —— 信息波 f6 接收入口（小白说明）
   - 慢偏置扣除 + Gauss 匹配滤波
   - 硬比特 UDP 14346 + 软符号 float UDP 14347
   - IQ/FM 探头（给解码器做 AGC）
-  - 可选 INFO_F6_IQ_RECORD=路径 录 IQ 复盘
+  - 可选 IQ 录波，事后用 info_f6_iq_replay.py 离线复盘
 
-与 info_decoder_f6 配对；SPS=47 / Sens=1.5628 不变。
+【怎么启动】平时不用单独跑它，`python3 info_decoder_f6.py` 会自动把它拉起来。
+            要单独看频谱窗时才：`python3 tx_radio6.py`
+
+【要调档位/AGC】改 tx_radio6_tunes.py，不需要任何环境变量。
+与 info_decoder_f6 配对；SPS=47 / Sens=1.5628 不变，任何时候都不要动。
 """
 
 from __future__ import annotations
 
-import os
 import signal
 import sys
 from distutils.version import StrictVersion
@@ -23,26 +26,43 @@ from distutils.version import StrictVersion
 from PyQt5 import Qt
 
 from tx_radio6_flow import tx_radio6_flow
-from tx_radio6_tunes import AUTO_TUNE_ORDER, RUNTIME_TUNES
+from tx_radio6_tunes import (
+    AUTO_TUNE_ORDER,
+    BOOT_PROFILE,
+    RUNTIME_TUNES,
+    SOFT_UDP_PORT,
+)
 
 
-PROFILE = os.environ.get("INFO_F6_PROFILE", "auto").strip().lower()
+# 开机拓扑选哪个：唯一来源是 tx_radio6_tunes.BOOT_PROFILE，解码器读的是同一份。
+PROFILE = BOOT_PROFILE
 
+# =============================================================================
+# ★★★★★ 调参面板（射频档位与 AGC 在 tx_radio6_tunes.py）★★★★★
+# =============================================================================
 PLUTO_URI = "ip:192.168.3.1"
 TARGET_FREQ_HZ = 433_200_000
 SAMPLE_RATE_HZ = 1_000_000
 SPS = 47
 SENSITIVITY = 1.5628
-BT = 0.35
+BT = 0.35  # 高斯匹配滤波的 BT 积，官方 GFSK 调制用的就是 0.35
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
-SOFT_UDP_PORT = int(os.environ.get("INFO_F6_SOFT_UDP_PORT", "14347"))
 RPC_PORT = 8081
-IQ_RECORD_PATH = os.environ.get("INFO_F6_IQ_RECORD", "").strip() or None
-ENABLE_SOFT_UDP = os.environ.get("INFO_F6_SOFT_UDP", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-BIAS_ALPHA = float(os.environ.get("INFO_F6_BIAS_ALPHA", "1e-5"))
+
+# 录 IQ 原始数据用于离线复盘：填一个路径字符串（如 "/tmp/info_f6.c64"）就开启，
+# 填 None 关闭。注意 1MHz 复数采样约 8MB/s，别录太久把磁盘写满。
+# 录完用：python3 competition/info/info_f6_iq_replay.py /tmp/info_f6.c64
+IQ_RECORD_PATH = None
+
+# 是否往 14347 发软符号。关掉后解码器只能走硬比特路径。
+ENABLE_SOFT_UDP = True
+
+# 慢偏置扣除的收敛系数。它替代了会破坏 Header 长 0 的短 DC blocker：
+# 越小跟得越慢但越不会吃掉数据，1e-5 相当于约 10 万个采样的时间常数。
+# 只有在日志里看到鉴频均值长期严重偏离 0 时才需要调大。
+BIAS_ALPHA = 1e-5
+# =============================================================================
 
 BOOT_PROFILES = {
     "auto": {
@@ -90,7 +110,9 @@ BOOT_PROFILES = {
 def selected_boot_profile() -> dict:
     if PROFILE not in BOOT_PROFILES:
         choices = ", ".join(sorted(BOOT_PROFILES))
-        raise SystemExit(f"未知 INFO_F6_PROFILE={PROFILE!r}；可选：{choices}")
+        raise SystemExit(
+            f"tx_radio6_tunes.BOOT_PROFILE={PROFILE!r} 不认识；可选：{choices}"
+        )
     return dict(BOOT_PROFILES[PROFILE])
 
 

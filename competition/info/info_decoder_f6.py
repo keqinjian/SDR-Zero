@@ -20,15 +20,21 @@ info_decoder_f6.py —— 近最优信息波解码器（给无线电小白的说
   - 不要与 f3/f4/f5 同时开同一 Pluto/端口。
 
 【怎么启动】
-  INFO_F6_PROFILE=auto python3 competition/info/info_decoder_f6.py
-  比赛保守：INFO_F6_AUTO=0 INFO_F6_PROFILE=fixed_balanced …
-  详见 competition/docs/信息波f6近最优接收设计.md
+  python3 competition/info/info_decoder_f6.py
+  就这一条命令，不需要任何环境变量。它会自动拉起 tx_radio6.py。
+
+【要调参改哪里】
+  - 射频档位表 + AGC 上下限 + 开机拓扑 → tx_radio6_tunes.py 顶部的调参面板
+  - 软相关门槛 / 路径切换 / 协议 / 运行方式 → 本文件下面的调参面板
+  - 慢偏置系数 / IQ 录波 → tx_radio6.py 的调参面板
+  - 背景与调试流程 → competition/docs/信息波f6近最优接收设计.md
 """
 
 from __future__ import annotations
 
 from collections import deque
 import datetime
+import math
 import os
 import socket
 import struct
@@ -46,51 +52,83 @@ from tx_radio6_tunes import (
     AGC_GAIN_MIN_DB,
     AGC_STEP_DB,
     AUTO_TUNE_ORDER,
+    BOOT_PROFILE,
+    IQ_CLIP_FRACTION,
     IQ_CLIP_MAX_ABS,
     IQ_CLIP_RMS,
-    IQ_WEAK_MAX_ABS,
+    IQ_TARGET_RMS_HIGH,
+    IQ_TARGET_RMS_LOW,
+    IQ_WEAK_RMS,
     RUNTIME_TUNES,
+    SOFT_UDP_PORT,
 )
 
 
 # =============================================================================
-# ★★★★★ 现场优先只改这里 ★★★★★
+# ★★★★★ 调参面板：现场优先只改这里 ★★★★★
+#
+# 直接 `python3 competition/info/info_decoder_f6.py` 启动，不需要任何环境变量。
+# 射频档位与 AGC 上下限不在本文件，在 tx_radio6_tunes.py。
 # =============================================================================
+
+# 我方阵营。也可以让 /team 话题在运行中改（0=红, 1=蓝），这里只是开机默认值。
 MY_CAMP = "RED"
+
+# 与 tx_radio6.py 之间的本机管道。硬比特每个 UDP 字节 = 1 bit；
+# 软符号端口在 tx_radio6_tunes.SOFT_UDP_PORT（收发两端必须一致，所以放那边）。
 UDP_IP = "127.0.0.1"
-UDP_PORT = 14346  # 硬比特（每个 UDP 字节 = 1 bit）
-SOFT_UDP_PORT = int(os.environ.get("INFO_F6_SOFT_UDP_PORT", "14347"))  # 软符号 float32
+UDP_PORT = 14346
 RPC_URL = "http://127.0.0.1:8081"
 
-F6_PROFILE = os.environ.get("INFO_F6_PROFILE", "auto").strip().lower()
-ENABLE_AUTO = os.environ.get("INFO_F6_AUTO", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-ENABLE_SOFT_SYNC = os.environ.get("INFO_F6_SOFT_SYNC", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-ACCESS_MAX_HAMMING_LOOSE = int(os.environ.get("INFO_F6_ACCESS_HAMMING", "4"))
+# 是否允许运行中自动 AGC / 换 RF 档。
+# 改成 False 就变成"固定档接收"，用来和自动模式做对照实验。
+ENABLE_AUTO = True
+
+# 是否优先用软符号做包头同步。
+# 改成 False 就只走硬比特路径（等价于 f5 的做法），用来判断软相关有没有帮上忙。
+ENABLE_SOFT_SYNC = True
+
+# 软相关门槛，取值是**归一化相关系数**（0~1），与信号幅度无关：
+#   ρ = <soft, 模板> / (|soft| · |模板|)，1.0 表示完美对齐，纯噪声在 0 附近。
+# 调法：
+#   日志里 softAC 一直是 0   → 调低到 0.45~0.50（更容易抓包头，但假同步变多）
+#   softAC 很多但 Header 全废 → 调高到 0.70~0.75（更严，减少假同步）
+# 别低于 0.4：64 个符号的纯噪声相关标准差约 0.125，再低就淹在误报里了。
+SOFT_CORR_MIN = 0.60
+
+# 软/硬路径互切前要连续多久颗粒无收（秒）。
+# 两条路解的是同一串符号，任何时刻只能有一条供货，详见主循环里的说明。
+# 觉得它切得太勤就调大。
+PATH_FALLBACK_SILENCE_S = 5.0
+
+# Access Code（64bit 同步字）容错上下限，程序会在这两个值之间自己收放：
+#   LOOSE 4 = 平时用，弱信号更容易抓到包头
+#   TIGHT 2 = 发现"假包很多、CRC 全挂"时自动收紧
+ACCESS_MAX_HAMMING_LOOSE = 4
 ACCESS_MAX_HAMMING_TIGHT = 2
+
+# Header 不允许花码，放宽必然引入假帧。除非做实验，否则不要改这个 0。
 HEADER_MAX_HAMMING = 0
-# 软相关分数门槛（理想 ±1 符号时满分约 64；噪声下会低一些）
-SOFT_CORR_MIN = float(os.environ.get("INFO_F6_SOFT_CORR_MIN", "40"))
 
 ENABLE_PACKET_WINDOW_RECOVERY = True
 PACKET_WINDOW_PAYLOADS = 8
 FRAME_DEDUP_TTL_S = 2.0
-ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
-    "0", "false", "False", "no", "NO",
+
+# 看门狗：True 时本程序会自动拉起 tx_radio6.py 并在 UDP 断流时重启它。
+# 想手动分两个终端跑（比如要盯频谱窗），改成 False，然后自己先跑 tx_radio6.py。
+ENABLE_GRC_WATCHDOG = True
+GRC_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio6.py"
 )
-GRC_SCRIPT_PATH = os.environ.get(
-    "INFO_GRC_SCRIPT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio6.py"),
-)
+
 UDP_WATCHDOG_S = 2.0
 GRC_BOOT_WAIT_S = 3.5
-RECORD_STREAM = os.environ.get("INFO_F6_RECORD", "0") in (
-    "1", "true", "True", "yes", "YES",
-)
+
+# 把收到的原始 0/1 存成文本，事后复盘用。会增加磁盘 I/O。
+# 想复盘射频而不是比特，用 tx_radio6.py 里的 IQ_RECORD_PATH。
+RECORD_STREAM = False
 RECORD_PREFIX = "info_f6_record"
+
 SELF_TEST_ON_START = True
 STAT_INTERVAL_S = 2.0
 IDLE_SLEEP_S = 0.001
@@ -98,12 +136,18 @@ BIT_BUFFER_MAX = 240_000
 SOFT_BUFFER_MAX = 240_000
 SERIAL_BUFFER_MAX = 16_384
 
-AUTO_COOLDOWN_S = float(os.environ.get("INFO_F6_AUTO_COOLDOWN_S", "6"))
-AUTO_EXPLORE_SILENCE_S = float(os.environ.get("INFO_F6_AUTO_SILENCE_S", "4"))
-AUTO_LOCK_GOOD_WINDOWS = 3
-AUTO_RELOCK_SILENCE_S = 10.0
-AGC_COOLDOWN_S = float(os.environ.get("INFO_F6_AGC_COOLDOWN_S", "2"))  # 小步增益冷却
+# ---- 自动换档 / AGC 的"脾气"参数（单位：秒或计数，均相对 2s 统计窗）----
+# 觉得它动作太频繁 → 调大；觉得反应太慢 → 调小，但别小于统计窗 2s，
+# 否则一窗数据还没攒够就乱切。
+AUTO_COOLDOWN_S = 6.0  # 两次大换档最短间隔
+AUTO_EXPLORE_SILENCE_S = 4.0  # 无帧多久开始探索
+AUTO_LOCK_GOOD_WINDOWS = 3  # 连续几个好窗口就锁定当前档
+AUTO_RELOCK_SILENCE_S = 10.0  # 锁定后再无帧多久重新探索
+AGC_COOLDOWN_S = 2.0  # 两次小步增益调整的最短间隔
 # =============================================================================
+
+# 当前开机拓扑名，只用于日志与"是否允许自动"的判断；值在 tx_radio6_tunes.py 改。
+F6_PROFILE = BOOT_PROFILE
 
 INFO_FREQ_MAP = base.INFO_FREQ_MAP
 INFO_SENSITIVITY = base.INFO_SENSITIVITY
@@ -131,16 +175,46 @@ handle_valid_frame = f3.handle_valid_frame
 f3.FRAME_DEDUP_TTL_S = FRAME_DEDUP_TTL_S
 
 
-def _clip_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    return float(raw)
+def _is_clipping(iq: dict) -> bool:
+    """
+    判定“前端真的被推饱和了”。
+
+    必须同时满足：到轨样本占比达到门槛（不是偶发单点），并且峰值或有效值也
+    确实顶到高位。旧版只看 max_abs 一个瞬时峰值，一次脉冲干扰就会误判成削顶，
+    然后把增益一路降到 25dB，弱信息波直接消失——这正是 f6 收不到东西的原因之一。
+    """
+    if int(iq.get("count", 0) or 0) <= 0:
+        return False
+    clip_frac = float(iq.get("clip_frac", 0.0) or 0.0)
+    max_axis = float(iq.get("max_axis", iq.get("max_abs", 0.0)) or 0.0)
+    rms = float(iq.get("rms", 0.0) or 0.0)
+    if clip_frac >= IQ_CLIP_FRACTION and max_axis >= IQ_CLIP_MAX_ABS:
+        return True
+    return rms >= IQ_CLIP_RMS
 
 
-IQ_CLIP_MAX_ABS_EFF = _clip_env("INFO_F6_IQ_CLIP_MAX_ABS", IQ_CLIP_MAX_ABS)
-IQ_WEAK_MAX_ABS_EFF = _clip_env("INFO_F6_IQ_WEAK_MAX_ABS", IQ_WEAK_MAX_ABS)
-IQ_CLIP_RMS_EFF = _clip_env("INFO_F6_IQ_CLIP_RMS", IQ_CLIP_RMS)
+def _headroom_gain_delta(iq: dict) -> float:
+    """
+    根据 IQ 有效值与目标区间的差距，算出该加/该减多少 dB。
+
+    目标是把 RMS 拉进 [LOW, HIGH]。落在区间内返回 0；偏离越远步子越大，
+    但单次不超过 3 个 AGC_STEP，避免一步跨过头来回振荡。
+    """
+    count = int(iq.get("count", 0) or 0)
+    if count <= 0:
+        return 0.0
+    rms = float(iq.get("rms", 0.0) or 0.0)
+    if rms <= 0.0:
+        return AGC_STEP_DB * 3.0
+    if rms < IQ_TARGET_RMS_LOW:
+        target = IQ_TARGET_RMS_LOW
+    elif rms > IQ_TARGET_RMS_HIGH:
+        target = IQ_TARGET_RMS_HIGH
+    else:
+        return 0.0
+    delta_db = 20.0 * math.log10(target / rms)
+    limit = AGC_STEP_DB * 3.0
+    return max(-limit, min(limit, delta_db))
 
 
 class AdaptiveController:
@@ -170,8 +244,9 @@ class AdaptiveController:
         self.last_action = "init"
         self.switches = 0
         self.agc_gain = float(RUNTIME_TUNES[start_tune]["rx_gain_db"])
-        self.last_iq = {"count": 0, "max_abs": 0.0, "rms": 0.0}
+        self.last_iq = {"count": 0, "max_abs": 0.0, "rms": 0.0, "clip_frac": 0.0}
         self.last_fm = {"count": 0, "estimated_cfo_hz": 0.0, "mean": 0.0}
+        self.last_soft = {"count": 0, "rms": 0.0}
 
     def _rf_auto_enabled(self) -> bool:
         return ENABLE_AUTO and F6_PROFILE == "auto"
@@ -236,6 +311,13 @@ class AdaptiveController:
         return True
 
     def _poll_probes(self, node: "InfoDecoderNode") -> None:
+        """
+        把三个探头都读空。
+
+        注意 soft 探头也必须读：GNU Radio 侧的 vector_sink 只有被读走才会
+        清空，漏读的那一个会以约 200kB/s 的速度无限吃内存，跑几十分钟就能把
+        接收机拖垮。之前只读了 IQ/FM 两个，soft 探头一直在涨。
+        """
         if node.grc_rpc is None:
             return
         try:
@@ -246,10 +328,31 @@ class AdaptiveController:
             self.last_fm = dict(node.grc_rpc.get_fm_stats())
         except Exception:
             pass
+        try:
+            self.last_soft = dict(node.grc_rpc.get_soft_stats())
+        except Exception:
+            pass
 
     def _next_explore_tune(self) -> str:
         self.tune_index = (self.tune_index + 1) % len(AUTO_TUNE_ORDER)
         return AUTO_TUNE_ORDER[self.tune_index]
+
+    def _next_gain_step(self) -> str:
+        """在同带宽/同 FIR 的档位里找下一个更高增益的档；到顶返回空串。"""
+        cur = RUNTIME_TUNES.get(self.tune_name)
+        if cur is None:
+            return "weak_boost"
+        cur_gain = float(cur["rx_gain_db"])
+        candidates = [
+            (float(t["rx_gain_db"]), name)
+            for name, t in RUNTIME_TUNES.items()
+            if name in AUTO_TUNE_ORDER
+            and float(t["rx_gain_db"]) > cur_gain
+            and int(t["rf_bandwidth_hz"]) == int(cur["rf_bandwidth_hz"])
+        ]
+        if not candidates:
+            return ""
+        return min(candidates)[1]
 
     def update(
         self,
@@ -277,39 +380,32 @@ class AdaptiveController:
 
         self._poll_probes(node)
         iq = self.last_iq
-        max_abs = float(iq.get("max_abs", 0.0) or 0.0)
-        rms = float(iq.get("rms", 0.0) or 0.0)
         iq_count = int(iq.get("count", 0) or 0)
+        rms = float(iq.get("rms", 0.0) or 0.0)
+        clipping = _is_clipping(iq)
+        agc_ready = now - self.last_agc_ts >= AGC_COOLDOWN_S
 
         if not self._rf_auto_enabled():
             self.last_action = "auto-disabled"
             return
 
-        # 连续 AGC：削顶优先降增益（不清缓冲）
-        if (
-            iq_count > 0
-            and now - self.last_agc_ts >= AGC_COOLDOWN_S
-            and (max_abs >= IQ_CLIP_MAX_ABS_EFF or rms >= IQ_CLIP_RMS_EFF)
-        ):
-            self._apply_agc(
-                node, self.agc_gain - AGC_STEP_DB, now, "clip"
-            )
+        # 连续 AGC：只有探头确认持续削顶才降增益（不清缓冲）
+        if iq_count > 0 and agc_ready and clipping:
+            self._apply_agc(node, self.agc_gain - AGC_STEP_DB, now, "clip")
             return
+
+        # 没削顶就把工作点往目标 RMS 区间推。现场实测原始 IQ 只有 -55dBFS，
+        # 动态范围白白空着，这一步才是弱信号真正需要的“加曝光”。
+        headroom = _headroom_gain_delta(iq)
+        if iq_count > 0 and agc_ready and abs(headroom) >= 0.5:
+            reason = "headroom-up" if headroom > 0 else "headroom-down"
+            if self._apply_agc(node, self.agc_gain + headroom, now, reason):
+                return
 
         if frames > 0:
             self.good_windows += 1
             if self.good_windows >= AUTO_LOCK_GOOD_WINDOWS:
                 self.state = "locked"
-            # locked/有帧时仅微调：过弱则小升增益
-            if (
-                iq_count > 0
-                and max_abs < IQ_WEAK_MAX_ABS_EFF
-                and now - self.last_agc_ts >= AGC_COOLDOWN_S
-            ):
-                self._apply_agc(
-                    node, self.agc_gain + AGC_STEP_DB * 0.5, now, "weak-lock"
-                )
-                return
             self.last_action = (
                 f"hold:{self.tune_name}:g={self.agc_gain:.1f}:frames={frames}"
             )
@@ -319,31 +415,11 @@ class AdaptiveController:
 
         if self.state == "locked":
             if silence_s < AUTO_RELOCK_SILENCE_S:
-                if (
-                    iq_count > 0
-                    and max_abs < IQ_WEAK_MAX_ABS_EFF
-                    and now - self.last_agc_ts >= AGC_COOLDOWN_S
-                ):
-                    self._apply_agc(
-                        node, self.agc_gain + AGC_STEP_DB, now, "weak-silence"
-                    )
-                    return
                 self.last_action = f"locked-wait:{silence_s:.1f}s"
                 return
             self.state = "explore"
 
         if now - self.last_switch_ts < AUTO_COOLDOWN_S:
-            # 冷却期内仍允许 AGC
-            if (
-                iq_count > 0
-                and max_abs < IQ_WEAK_MAX_ABS_EFF
-                and ac == 0
-                and now - self.last_agc_ts >= AGC_COOLDOWN_S
-            ):
-                self._apply_agc(
-                    node, self.agc_gain + AGC_STEP_DB, now, "weak-explore"
-                )
-                return
             self.last_action = "cooldown"
             return
 
@@ -351,14 +427,12 @@ class AdaptiveController:
             self.last_action = f"observe:{silence_s:.1f}s"
             return
 
-        # 探头确认削顶 → desense 档（FIR/BW 也收）
-        if iq_count > 0 and (
-            max_abs >= IQ_CLIP_MAX_ABS_EFF or rms >= IQ_CLIP_RMS_EFF
-        ):
+        # 探头确认持续削顶且 AGC 已经降到底 → 才动用 desense 档（FIR/BW 也收）
+        if clipping and self.agc_gain <= AGC_GAIN_MIN_DB + AGC_STEP_DB:
             if self.tune_name != "desense":
                 self._apply_tune(node, "desense", now, "probe-clip", flush=True)
                 return
-            self._apply_agc(node, self.agc_gain - AGC_STEP_DB, now, "probe-clip")
+            self.last_action = "clip-floor"
             return
 
         if ac >= 4 and header_ok == 0 and header_fail >= max(1, ac // 2):
@@ -367,13 +441,17 @@ class AdaptiveController:
             return
 
         if header_ok >= 2 and frames == 0:
-            target = "weak_boost" if self.tune_name != "weak_boost" else "narrow"
-            self._apply_tune(node, target, now, "payload-starve", flush=True)
-            return
+            target = self._next_gain_step()
+            if target:
+                self._apply_tune(node, target, now, "payload-starve", flush=True)
+                return
 
-        if iq_count > 0 and max_abs < IQ_WEAK_MAX_ABS_EFF and ac == 0:
-            self._apply_agc(node, self.agc_gain + AGC_STEP_DB, now, "weak-noac")
-            return
+        # 探头说“天线上几乎什么都没有”，而且一个 Access 都没蹭到：大步加增益。
+        if iq_count > 0 and rms < IQ_WEAK_RMS and ac == 0 and agc_ready:
+            if self._apply_agc(
+                node, self.agc_gain + AGC_STEP_DB * 2.0, now, "weak-noac"
+            ):
+                return
 
         nxt = self._next_explore_tune()
         self._apply_tune(
@@ -505,11 +583,26 @@ def _find_access_hard(
     return None
 
 
-def _soft_corr_at(soft: list[float], offset: int) -> tuple[float, float]:
-    normal = 0.0
+_ACCESS_TEMPLATE_NORM = math.sqrt(64.0)
+
+
+def _soft_corr_at(soft: list[float], offset: int) -> float:
+    """
+    归一化相关系数 ρ = <soft, 模板> / (|soft| · |模板|)，范围 -1~1。
+
+    为什么必须除以 |soft|：鉴频器输出的幅度随增益、信噪比、离散档一起漂，
+    裸点积因此没有绝对意义。归一化之后 ρ 只反映“波形长得像不像”，
+    +1 是完全对齐，-1 是整包反相，噪声段自然落在 0 附近。
+    """
+    dot = 0.0
+    energy = 0.0
     for i, pm in enumerate(ACCESS_PM):
-        normal += soft[offset + i] * pm
-    return normal, -normal
+        sample = soft[offset + i]
+        dot += sample * pm
+        energy += sample * sample
+    if energy <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(energy) * _ACCESS_TEMPLATE_NORM)
 
 
 def find_access_soft(
@@ -521,21 +614,18 @@ def find_access_soft(
     """
     在软符号流上找 Access（从左到右第一个过阈值的位置）。
 
-    白话：把 Access 的 0/1 看成 -1/+1 模板，和 soft 波形做“点积”。
-    对齐得好时分数高；整包反相时用负模板（等价于分数取反）。
-    返回 (offset, inverted, corr, 由 sign(soft) 估的硬汉明距离)。
+    白话：把 Access 的 0/1 看成 -1/+1 模板，和 soft 波形比“形状相似度”。
+    ρ 接近 +1 表示对齐，接近 -1 表示整包反相（GFSK 极性翻转）。
+    返回 (offset, inverted, ρ 的绝对值, 由 sign(soft) 估的硬汉明距离)。
     """
     if len(soft) < 64:
         return None
     last = len(soft) - 64
-    # 理想 ±1 时 corr≈64-2d；允许 d<=access_max
-    thr = max(corr_min, float(64 - 2 * access_max) * 0.85)
+    thr = max(0.0, min(1.0, corr_min))
     for offset in range(last + 1):
-        normal, inverted_corr = _soft_corr_at(soft, offset)
-        if normal >= inverted_corr:
-            score, inv = normal, False
-        else:
-            score, inv = inverted_corr, True
+        rho = _soft_corr_at(soft, offset)
+        inv = rho < 0.0
+        score = -rho if inv else rho
         if score < thr:
             continue
         hard_bits = "".join(
@@ -544,8 +634,6 @@ def find_access_soft(
         if inv:
             hard_bits = base.invert_bits(hard_bits)
         dist = (int(hard_bits, 2) ^ AC_NORMAL_INT).bit_count()
-        if dist > access_max and score < float(64 - 2 * access_max):
-            continue
         return offset, inv, score, dist
     return None
 
@@ -561,7 +649,8 @@ def extract_air_payloads_soft(
     """
     软域拆空口包：相关找 Access → sign() 得到硬比特 → Header 仍硬匹配。
 
-    soft 再聪明也只负责同步；Header/CRC 铁律与 f3/f4 相同。
+    soft 再聪明也只负责同步；Header/CRC 铁律与 f3/f4 相同。软路径唯一的
+    放行条件就是归一化相关系数过阈值，误判全部交给严格 Header 兜住。
     """
     payloads: list[bytes] = []
     while len(soft) >= AIR_FRAME_SYMBOLS:
@@ -730,6 +819,17 @@ def run_self_test(node: InfoDecoderNode) -> bool:
         and soft_stats["ac_soft_hits"] >= 28
     )
 
+    # 回归用例：软/硬两条路径同时供货一定会毁掉裁判帧。
+    # 这里刻意复现旧版的错误合并方式，断言它确实解不出 15 帧，
+    # 以后谁再把两条路径接回一起，自检就会立刻报错。
+    interleaved = bytearray()
+    for soft_payload, hard_payload in zip(soft_payloads, payloads):
+        interleaved.extend(soft_payload)
+        interleaved.extend(hard_payload)
+    dup_stats = _fresh_stats(ACCESS_MAX_HAMMING_LOOSE)
+    dup_frames = drain_strict_frames(bytearray(interleaved), dup_stats)
+    single_path_ok = len(dup_frames) < 15
+
     second_header = AIR_FRAME_BITS + 64
     header_damaged = _flip_bits(clean_bits, (second_header,))
     header_stats = _fresh_stats(ACCESS_MAX_HAMMING_LOOSE)
@@ -772,13 +872,32 @@ def run_self_test(node: InfoDecoderNode) -> bool:
         and len(window_frames) == 15
         and cmd_ids.count(0x0A05) == 3
     )
-    ok = hard_ok and soft_ok and header_ok and frame_ok and access_adapt_ok
+    clip_ok = (
+        _is_clipping({"count": 1000, "clip_frac": 0.05, "max_axis": 0.99, "rms": 0.4})
+        and not _is_clipping(
+            {"count": 1000, "clip_frac": 0.0, "max_axis": 0.99, "rms": 0.02}
+        )
+        and _headroom_gain_delta({"count": 1000, "rms": 0.01}) > 0
+        and _headroom_gain_delta({"count": 1000, "rms": 0.15}) == 0.0
+    )
+
+    ok = (
+        hard_ok
+        and soft_ok
+        and header_ok
+        and frame_ok
+        and access_adapt_ok
+        and single_path_ok
+        and clip_ok
+    )
     node.get_logger().info(
         f"自检 硬切片={'通过' if hard_ok else '失败'} "
         f"软相关={'通过' if soft_ok else '失败'} "
         f"严格Header={'通过' if header_ok else '失败'} "
         f"15帧={'通过' if frame_ok else '失败'} "
-        f"Access自适应={'通过' if access_adapt_ok else '失败'}"
+        f"Access自适应={'通过' if access_adapt_ok else '失败'} "
+        f"单路径守恒={'通过' if single_path_ok else '失败'} "
+        f"削顶判定={'通过' if clip_ok else '失败'}"
     )
     node.get_logger().info(
         "==== f6 纯内存自检结束：%s ====" % ("全部通过 OK" if ok else "存在失败 FAIL")
@@ -833,7 +952,8 @@ def main() -> None:
     if SELF_TEST_ON_START and not run_self_test(node):
         node.get_logger().error("f6 离线自检未通过，请勿直接用于赛场！")
 
-    os.environ["INFO_F6_PROFILE"] = F6_PROFILE
+    # tx_radio6.py 和本文件读的是同一个 tx_radio6_tunes.BOOT_PROFILE，
+    # 不需要再靠环境变量把 profile 传给子进程。
     if ENABLE_GRC_WATCHDOG:
         base.restart_grc(node)
     else:
@@ -883,10 +1003,14 @@ def main() -> None:
     last_stat = time.time()
     last_udp = time.time()
     last_valid_frame = time.time()
+    # 同一时刻只有一条拆包路径在供货，见下方主循环里的说明。
+    active_path = "soft" if (soft_bound and ENABLE_SOFT_SYNC) else "hard"
+    last_path_payload = time.time()
+    last_path_switch = time.time()
 
     node.get_logger().info(
         f"监听 hard={UDP_PORT} soft={SOFT_UDP_PORT if soft_bound else 'off'} | "
-        f"GRC={GRC_SCRIPT_PATH} | profile={F6_PROFILE}"
+        f"GRC={GRC_SCRIPT_PATH} | profile={F6_PROFILE} | 拆包路径={active_path}"
     )
 
     try:
@@ -899,10 +1023,10 @@ def main() -> None:
                 serial_buffer.clear()
                 packet_window.clear()
                 dedupe.clear()
+                last_path_payload = now
 
             if ENABLE_GRC_WATCHDOG and now - last_udp > UDP_WATCHDOG_S:
                 node.get_logger().warn("UDP 断流，重启 tx_radio6…")
-                os.environ["INFO_F6_PROFILE"] = F6_PROFILE
                 base.restart_grc(node)
                 last_udp = time.time()
                 bit_buffer = ""
@@ -910,6 +1034,7 @@ def main() -> None:
                 serial_buffer.clear()
                 packet_window.clear()
                 dedupe.clear()
+                last_path_payload = last_udp
                 tune = RUNTIME_TUNES.get(node.auto.tune_name)
                 if node.grc_rpc is not None and tune is not None:
                     try:
@@ -947,14 +1072,16 @@ def main() -> None:
                 node.get_logger().info(
                     f"[f6 {F6_PROFILE}/{node.auto.tune_name} "
                     f"{node.auto.state} g={node.auto.agc_gain:.1f} "
-                    f"{elapsed:.1f}s] {rates} | "
+                    f"path={active_path} {elapsed:.1f}s] {rates} | "
                     f"AC0..{access_cap}={access_hist} softAC={stats['ac_soft_hits']} "
-                    f"corr={stats['last_soft_corr']:.1f} "
+                    f"corr={stats['last_soft_corr']:.2f} "
                     f"Header={stats['header_ok']}/{stats['header_fail']} "
                     f"CRC8/16={stats['crc8_fail']}/{stats['crc16_fail']} "
                     f"strict/window={stats['strict_frames']}/{stats['window_frames']} "
                     f"无帧={silence:.1f}s | "
+                    f"IQrms={float(iq.get('rms', 0)):.3f} "
                     f"IQmax={float(iq.get('max_abs', 0)):.3f} "
+                    f"clip={float(iq.get('clip_frac', 0)):.4f} "
                     f"CFOest={float(fm.get('estimated_cfo_hz', 0)):.0f}Hz | "
                     f"auto={node.auto.last_action}"
                 )
@@ -992,24 +1119,50 @@ def main() -> None:
             if len(soft_buffer) > SOFT_BUFFER_MAX:
                 soft_buffer = soft_buffer[-SOFT_BUFFER_MAX:]
 
+            # 软路径和硬路径解的是**同一串符号**（硬比特就是软符号取符号位），
+            # 两条路都往 serial_buffer 里灌，就会得到 P1软 P1硬 P2软 P2硬…，
+            # 15 字节的 Payload 被整段重复插入，跨 Payload 的裁判帧必然错位、
+            # CRC16 永远算不过——这就是 f6 一帧都收不到的根因。
+            # 因此任何时刻只允许一条路径供货，另一条清空缓冲待命。
             new_payloads: list[bytes] = []
-            if soft_bound and ENABLE_SOFT_SYNC and soft_buffer:
-                soft_buffer, soft_payloads = extract_air_payloads_soft(
+            if active_path == "soft":
+                bit_buffer = ""
+                soft_buffer, new_payloads = extract_air_payloads_soft(
                     soft_buffer, stats, node.auto.access_max
                 )
-                new_payloads.extend(soft_payloads)
+                if new_payloads:
+                    last_path_payload = now
+                elif (
+                    now - last_path_payload > PATH_FALLBACK_SILENCE_S
+                    and now - last_path_switch > PATH_FALLBACK_SILENCE_S
+                ):
+                    active_path = "hard"
+                    last_path_switch = now
+                    last_path_payload = now
+                    soft_buffer = []
+                    serial_buffer.clear()
+                    packet_window.clear()
+                    node.get_logger().info("[f6] 软路径无产出 → 切硬比特路径")
             else:
-                bit_buffer, hard_payloads = extract_air_payloads_hard(
+                soft_buffer = []
+                bit_buffer, new_payloads = extract_air_payloads_hard(
                     bit_buffer, stats, node.auto.access_max
                 )
-                new_payloads.extend(hard_payloads)
-
-            # soft 优先时仍可用硬路径作补充（避免 soft 丢包）；去重靠上层 dedupe
-            if soft_bound and ENABLE_SOFT_SYNC and bit_buffer:
-                bit_buffer, hard_extra = extract_air_payloads_hard(
-                    bit_buffer, stats, node.auto.access_max
-                )
-                new_payloads.extend(hard_extra)
+                if new_payloads:
+                    last_path_payload = now
+                elif (
+                    soft_bound
+                    and ENABLE_SOFT_SYNC
+                    and now - last_path_payload > PATH_FALLBACK_SILENCE_S
+                    and now - last_path_switch > PATH_FALLBACK_SILENCE_S
+                ):
+                    active_path = "soft"
+                    last_path_switch = now
+                    last_path_payload = now
+                    bit_buffer = ""
+                    serial_buffer.clear()
+                    packet_window.clear()
+                    node.get_logger().info("[f6] 硬路径无产出 → 切软相关路径")
 
             if new_payloads:
                 packet_window.extend(new_payloads)

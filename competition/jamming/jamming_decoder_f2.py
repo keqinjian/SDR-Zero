@@ -73,14 +73,12 @@ UDP_IP = "127.0.0.1"
 UDP_PORT = 14348
 RPC_URL = "http://127.0.0.1:8080"
 
-# 环境变量 RM_ENABLE_GRC_WATCHDOG=0 可关闭（mock 基带注入时务必关）
-ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-# 默认：与本文件同目录的 tx_radio.py；可用 JAMMING_GRC_SCRIPT 覆盖
-GRC_SCRIPT_PATH = os.environ.get(
-    "JAMMING_GRC_SCRIPT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio.py"),
+# 看门狗：True 时本程序会自动拉起 tx_radio.py，并在 UDP 断流时重启它。
+# 用 mock 基带直接往 UDP 灌数据做离线调试时，务必改成 False，
+# 否则看门狗会不停重启 GNU Radio 抢占 Pluto。
+ENABLE_GRC_WATCHDOG = True
+GRC_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio.py"
 )
 
 RECORD_STREAM = True

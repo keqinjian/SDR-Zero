@@ -21,9 +21,13 @@ info_decoder_f5.py —— 现场自适应信息波解码器（给无线电小白
   SPS=47、Sens=1.5628、Header 精确匹配、CRC 通过才发 ROS。
 
 【怎么启动】
-  INFO_F5_PROFILE=auto python3 competition/info/info_decoder_f5.py
-  关掉自动换档：INFO_F5_AUTO_TUNE=0 …
-  详见 competition/docs/信息波f5自适应调试指南.md
+  python3 competition/info/info_decoder_f5.py
+  就这一条命令，不需要任何环境变量。它会自动拉起 tx_radio5.py。
+
+【要调参改哪里】
+  - 射频档位表 + 开机拓扑 → tx_radio5_tunes.py 顶部的调参面板
+  - 自动换档脾气 / 协议 / 运行方式 → 本文件下面的调参面板
+  - 背景与调试流程 → competition/docs/信息波f5自适应调试指南.md
 """
 
 from __future__ import annotations
@@ -42,56 +46,77 @@ from std_msgs.msg import Int8, String
 
 import info_decoder_f1 as base
 import info_decoder_f3 as f3
-from tx_radio5_tunes import AUTO_TUNE_ORDER, RUNTIME_TUNES
+from tx_radio5_tunes import (
+    AUTO_TUNE_ORDER,
+    BOOT_PROFILE,
+    RUNTIME_TUNES,
+)
 
 
 # =============================================================================
-# ★★★★★ 现场优先只改这里 ★★★★★
+# ★★★★★ 调参面板：现场优先只改这里 ★★★★★
+#
+# 直接 `python3 competition/info/info_decoder_f5.py` 启动，不需要任何环境变量。
+# 射频档位（增益 / 带宽 / FIR）不在本文件，在 tx_radio5_tunes.py。
 # =============================================================================
+
+# 我方阵营。也可以让 /team 话题在运行中改（0=红, 1=蓝），这里只是开机默认值。
 MY_CAMP = "RED"
+
+# 与 tx_radio5.py 之间的本机管道，端口冲突时才动。
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
 RPC_URL = "http://127.0.0.1:8081"
 
-# auto = 允许运行时换档；baseline / weak_fixed = 更偏固定接收
-F5_PROFILE = os.environ.get("INFO_F5_PROFILE", "auto").strip().lower()
-ENABLE_AUTO_TUNE = os.environ.get("INFO_F5_AUTO_TUNE", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-# Access：平时可放到 4；发现“假包很多、CRC 全挂”时收到 2
-ACCESS_MAX_HAMMING_LOOSE = int(os.environ.get("INFO_F5_ACCESS_HAMMING", "4"))
+# 是否允许运行中自动换 RF 档。
+# 改成 False 就变成"固定档接收"，用来和自动模式做对照实验；
+# 此时实际用的是 tx_radio5_tunes.BOOT_PROFILE 选中的那一档。
+ENABLE_AUTO_TUNE = True
+
+# Access Code（64bit 同步字）容错上下限，程序会在这两个值之间自己收放：
+#   LOOSE 4 = 平时用，弱信号更容易抓到包头
+#   TIGHT 2 = 发现"假包很多、CRC 全挂"时自动收紧
+ACCESS_MAX_HAMMING_LOOSE = 4
 ACCESS_MAX_HAMMING_TIGHT = 2
-HEADER_MAX_HAMMING = 0  # Header 仍不允许花码
+
+# Header 不允许花码，放宽必然引入假帧。除非做实验，否则不要改这个 0。
+HEADER_MAX_HAMMING = 0
 
 ENABLE_PACKET_WINDOW_RECOVERY = True
 PACKET_WINDOW_PAYLOADS = 8
 FRAME_DEDUP_TTL_S = 2.0
-ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
-    "0", "false", "False", "no", "NO",
+
+# 看门狗：True 时本程序会自动拉起 tx_radio5.py 并在 UDP 断流时重启它。
+# 想手动分两个终端跑（比如要盯频谱窗），改成 False，然后自己先跑 tx_radio5.py。
+ENABLE_GRC_WATCHDOG = True
+GRC_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio5.py"
 )
-GRC_SCRIPT_PATH = os.environ.get(
-    "INFO_GRC_SCRIPT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio5.py"),
-)
+
 UDP_WATCHDOG_S = 2.0
 GRC_BOOT_WAIT_S = 3.5
-RECORD_STREAM = os.environ.get("INFO_F5_RECORD", "0") in (
-    "1", "true", "True", "yes", "YES",
-)
+
+# 把收到的原始 0/1 存成文本，事后复盘用。会增加磁盘 I/O。
+RECORD_STREAM = False
 RECORD_PREFIX = "info_f5_record"
+
 SELF_TEST_ON_START = True
 STAT_INTERVAL_S = 2.0
 IDLE_SLEEP_S = 0.001
 BIT_BUFFER_MAX = 180_000  # 比 f3/f4 更长，给弱信号拼包留余量
 SERIAL_BUFFER_MAX = 16_384
 
-# ---- 自动换档“脾气”参数（单位：秒或计数，均相对 2s 统计窗）----
-AUTO_COOLDOWN_S = float(os.environ.get("INFO_F5_AUTO_COOLDOWN_S", "6"))  # 两次大换档最短间隔
-AUTO_EXPLORE_SILENCE_S = float(os.environ.get("INFO_F5_AUTO_SILENCE_S", "4"))  # 无帧多久开始探索
+# ---- 自动换档"脾气"参数（单位：秒或计数，均相对 2s 统计窗）----
+# 觉得它换档太频繁 → 把 COOLDOWN 和 SILENCE 调大；
+# 觉得它反应太慢   → 调小，但别小于统计窗 2s，否则一窗数据还没攒够就乱切。
+AUTO_COOLDOWN_S = 6.0  # 两次大换档最短间隔
+AUTO_EXPLORE_SILENCE_S = 4.0  # 无帧多久开始探索
 AUTO_LOCK_GOOD_WINDOWS = 3  # 连续几个好窗口就锁定当前档
 AUTO_RELOCK_SILENCE_S = 10.0  # 锁定后再无帧多久重新探索
-UDP_BUSY_BYTES = 20_000  # UDP 很忙但完全无 Access → 怀疑前端削顶
 # =============================================================================
+
+# 当前开机拓扑名，只用于日志与"是否允许自动"的判断；值在 tx_radio5_tunes.py 改。
+F5_PROFILE = BOOT_PROFILE
 
 INFO_FREQ_MAP = base.INFO_FREQ_MAP
 INFO_SENSITIVITY = base.INFO_SENSITIVITY
@@ -184,6 +209,23 @@ class AdaptiveController:
         self.tune_index = (self.tune_index + 1) % len(AUTO_TUNE_ORDER)
         return AUTO_TUNE_ORDER[self.tune_index]
 
+    def _next_gain_step(self) -> str:
+        """在同带宽/同 FIR 的档位里找下一个更高增益的档；到顶返回空串。"""
+        cur = RUNTIME_TUNES.get(self.tune_name)
+        if cur is None:
+            return "weak_boost"
+        cur_gain = float(cur["rx_gain_db"])
+        candidates = [
+            (float(t["rx_gain_db"]), name)
+            for name, t in RUNTIME_TUNES.items()
+            if name in AUTO_TUNE_ORDER
+            and float(t["rx_gain_db"]) > cur_gain
+            and int(t["rf_bandwidth_hz"]) == int(cur["rf_bandwidth_hz"])
+        ]
+        if not candidates:
+            return ""
+        return min(candidates)[1]
+
     def update(
         self,
         node: "InfoDecoderNode",
@@ -198,10 +240,15 @@ class AdaptiveController:
 
         判读口诀（小白版）：
           - 有有效帧 → 保持，争取进入 locked
-          - UDP 很多但 Access=0 → 可能 IQ 顶平，切 desense（降增益）
           - 有 Access 无 Header → 滤波可能切太狠，放宽 FIR
           - 有 Header 无完整帧 → Payload 烂了，试抬增益或收窄邻道
-          - 其它长时间无帧 → 按 AUTO_TUNE_ORDER 轮换
+          - 其它长时间无帧 → 按 AUTO_TUNE_ORDER 轮换（增益单调往上爬）
+
+        这里刻意**不做**削顶推断。f5 没有 IQ 探头，唯一能看到的 udp_bytes 是
+        GNU Radio 判决后的比特流量：即使天线上什么都没有，噪声也会被硬判成
+        0/1 源源不断地发过来，所以“udp_bytes 大 + Access=0”是纯噪声的常态，
+        而不是削顶的证据。旧版据此切到 desense(25dB) 会把弱信息波直接埋掉。
+        需要判定削顶请用 f6（有 IQ 探头）。
         """
         frames = int(stats.get("strict_frames", 0)) + int(
             stats.get("window_frames", 0)
@@ -210,7 +257,6 @@ class AdaptiveController:
         header_ok = int(stats.get("header_ok", 0))
         header_fail = int(stats.get("header_fail", 0))
         crc16_fail = int(stats.get("crc16_fail", 0))
-        udp_bytes = int(stats.get("udp_bytes", 0))
 
         # Access 容错本地可调，不依赖 RF RPC。
         if ac >= 8 and frames == 0 and crc16_fail >= 3:
@@ -248,23 +294,18 @@ class AdaptiveController:
             self.last_action = f"observe:{silence_s:.1f}s"
             return
 
-        # UDP 很忙但完全没有 Access：优先怀疑前端削顶/阻塞。
-        if udp_bytes >= UDP_BUSY_BYTES and ac == 0:
-            if self.tune_name != "desense":
-                self._apply_tune(node, "desense", now, "clipping?")
-                return
-
         # 有 Access 无 Header：滤波可能过陡或边带被切。
         if ac >= 4 and header_ok == 0 and header_fail >= ac // 2:
             target = "wide_fir" if self.tune_name != "wide_fir" else "weak_boost"
             self._apply_tune(node, target, now, "header-starve")
             return
 
-        # 有 Header 但帧组不起来：试抬增益或收窄邻道。
+        # 有 Header 但帧组不起来：Payload 信噪比不够，沿增益阶梯往上爬一格。
         if header_ok >= 2 and frames == 0:
-            target = "weak_boost" if self.tune_name != "weak_boost" else "narrow"
-            self._apply_tune(node, target, now, "payload-starve")
-            return
+            target = self._next_gain_step()
+            if target:
+                self._apply_tune(node, target, now, "payload-starve")
+                return
 
         # 通用轮换。
         nxt = self._next_explore_tune()
@@ -592,12 +633,9 @@ def main() -> None:
     if SELF_TEST_ON_START and not run_self_test(node):
         node.get_logger().error("f5 离线自检未通过，请勿直接用于赛场！")
 
-    # 自检会暂时关掉 auto 动作里的切档；确保环境变量下 auto 仍按配置启用。
-    os.environ.setdefault("INFO_F5_PROFILE", F5_PROFILE)
-
+    # tx_radio5.py 和本文件读的是同一个 tx_radio5_tunes.BOOT_PROFILE，
+    # 不需要再靠环境变量把 profile 传给子进程。
     if ENABLE_GRC_WATCHDOG:
-        # 让 GRC 子进程继承同一 profile。
-        os.environ["INFO_F5_PROFILE"] = F5_PROFILE
         base.restart_grc(node)
     else:
         connect_grc(node)
@@ -652,7 +690,6 @@ def main() -> None:
 
             if ENABLE_GRC_WATCHDOG and now - last_udp > UDP_WATCHDOG_S:
                 node.get_logger().warn("UDP 断流，重启 tx_radio5…")
-                os.environ["INFO_F5_PROFILE"] = F5_PROFILE
                 base.restart_grc(node)
                 last_udp = time.time()
                 bit_buffer = ""

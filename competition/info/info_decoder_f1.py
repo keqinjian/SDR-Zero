@@ -75,15 +75,12 @@ UDP_PORT = 14346
 RPC_URL = "http://127.0.0.1:8081"
 
 # --- 看门狗（与 jamming_decoder_f2 同款）---------------------------------
-# 环境变量 RM_ENABLE_GRC_WATCHDOG=0 可关闭（mock 基带注入时务必关）。
 # True：由本程序拉起信息波 GRC，并在 UDP 断流时自动重启（自愈）。
-ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
-    "0", "false", "False", "no", "NO",
-)
-# 默认：与本文件同目录的 tx_radio.py；可用环境变量 INFO_GRC_SCRIPT 覆盖
-GRC_SCRIPT_PATH = os.environ.get(
-    "INFO_GRC_SCRIPT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio.py"),
+# 用 mock 基带直接往 UDP 灌数据做离线调试时，务必改成 False。
+# 注意 f3/f4/f5/f6 会在导入后覆盖这两个值，指向各自的 tx_radio*.py。
+ENABLE_GRC_WATCHDOG = True
+GRC_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio.py"
 )
 # UDP 断流多久判定 GRC 掉线并重启（秒）
 UDP_WATCHDOG_S = 2.0
@@ -844,7 +841,8 @@ def restart_grc(node: InfoDecoderNode) -> None:
 
     if not os.path.isfile(GRC_SCRIPT_PATH):
         node.get_logger().error(
-            f"GRC 脚本不存在: {GRC_SCRIPT_PATH}（可用 INFO_GRC_SCRIPT 覆盖）"
+            f"GRC 脚本不存在: {GRC_SCRIPT_PATH}"
+            "（路径在各解码器调参面板的 GRC_SCRIPT_PATH 里改）"
         )
         return
 

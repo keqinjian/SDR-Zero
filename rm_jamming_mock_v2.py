@@ -14,10 +14,11 @@ rm_jamming_mock_v2.py
   填充：0x0A06 后跟原始随机字节（不是假 cmd_id=0xDEAD 的裁判帧）。
 
 用法（Ubuntu + ROS2）：
-  1) RM_ENABLE_GRC_WATCHDOG=0 python3 competition/jamming/jamming_decoder_f2.py
-  2) python3 rm_jamming_mock_v2.py
-  3) 看 radar/jamming_key / 日志是否出现密钥
-     （务必关看门狗，否则 GRC 与 mock 抢同一 UDP 口）
+  1) 先把 jamming_decoder_f2.py 调参面板里的 ENABLE_GRC_WATCHDOG 改成 False，
+     否则它会拉起 GRC，和本 mock 抢同一个 UDP 口。
+  2) python3 competition/jamming/jamming_decoder_f2.py
+  3) python3 rm_jamming_mock_v2.py
+  4) 看 radar/jamming_key / 日志是否出现密钥
 """
 
 from __future__ import annotations

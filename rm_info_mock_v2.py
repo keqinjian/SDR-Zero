@@ -13,10 +13,11 @@ rm_info_mock_v2.py
   本版：往 14346 发「每字节一个 bit（数值 0/1）」，格式与 GFSK Demod→UDP Sink 一致。
 
 用法（Ubuntu + ROS2）：
-  1) RM_ENABLE_GRC_WATCHDOG=0 python3 competition/info/info_decoder_f1.py
-  2) python3 rm_info_mock_v2.py
-  3) 看 decoder 日志里 0x0A01～0x0A05 计数是否上涨
-     （务必关看门狗，否则 GRC 与 mock 抢同一 UDP 口）
+  1) 先把解码器调参面板里的 ENABLE_GRC_WATCHDOG 改成 False，
+     否则它会拉起 GRC，和本 mock 抢同一个 UDP 口。
+  2) python3 competition/info/info_decoder_f1.py
+  3) python3 rm_info_mock_v2.py
+  4) 看 decoder 日志里 0x0A01～0x0A05 计数是否上涨
 """
 
 from __future__ import annotations

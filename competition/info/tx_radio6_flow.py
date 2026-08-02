@@ -50,6 +50,12 @@ def _float_stats(samples) -> dict:
     }
 
 
+# ADC 削顶是按 I/Q 两路各自到轨判定的，不是看复数模长：
+# 只要 |I| 或 |Q| 贴到满量程就已经失真了。单个 max 值容易被一次脉冲干扰
+# 带偏，所以额外统计“到轨样本占比”，让上层能要求“持续削顶”才降增益。
+CLIP_AXIS_LEVEL = 0.98
+
+
 def _complex_stats(samples) -> dict:
     count = len(samples)
     if count == 0:
@@ -58,17 +64,26 @@ def _complex_stats(samples) -> dict:
             "mean_abs": 0.0,
             "rms": 0.0,
             "max_abs": 0.0,
+            "max_axis": 0.0,
+            "clip_frac": 0.0,
             "mean_i": 0.0,
             "mean_q": 0.0,
         }
     abs_sum = 0.0
     power = 0.0
     max_abs = 0.0
+    max_axis = 0.0
+    clipped = 0
     real_sum = 0.0
     imag_sum = 0.0
     for sample in samples:
         real_sum += sample.real
         imag_sum += sample.imag
+        axis = max(abs(sample.real), abs(sample.imag))
+        if axis > max_axis:
+            max_axis = axis
+        if axis >= CLIP_AXIS_LEVEL:
+            clipped += 1
         magnitude = abs(sample)
         abs_sum += magnitude
         power += magnitude * magnitude
@@ -79,6 +94,8 @@ def _complex_stats(samples) -> dict:
         "mean_abs": float(abs_sum / count),
         "rms": float(math.sqrt(power / count)),
         "max_abs": float(max_abs),
+        "max_axis": float(max_axis),
+        "clip_frac": float(clipped) / float(count),
         "mean_i": float(real_sum / count),
         "mean_q": float(imag_sum / count),
     }

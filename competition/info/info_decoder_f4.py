@@ -21,8 +21,13 @@ info_decoder_f4.py —— 弱信号信息波解码器（给无线电小白的说
   - 不要和 f3 同时开：共用 Pluto、UDP 14346、RPC 8081。
 
 【怎么启动】
-  INFO_F4_PROFILE=weak_antijam python3 competition/info/info_decoder_f4.py
-  详见 competition/docs/信息波f4弱信号调试指南.md
+  python3 competition/info/info_decoder_f4.py
+  就这一条命令，不需要任何环境变量。它会自动拉起 tx_radio4.py。
+
+【要调参改哪里】
+  - 射频档位（增益 / 带宽 / FIR）→ tx_radio4_tunes.py 顶部的调参面板
+  - 协议与运行方式（阵营 / Access 容错 / 看门狗 / 录波）→ 本文件下面的调参面板
+  - 背景与调试流程 → competition/docs/信息波f4弱信号调试指南.md
 """
 
 from __future__ import annotations
@@ -41,46 +46,61 @@ from std_msgs.msg import Int8, String
 
 import info_decoder_f1 as base
 import info_decoder_f3 as f3
+import tx_radio4_tunes
 
 
 # =============================================================================
-# ★★★★★ 现场优先只改这里 ★★★★★
+# ★★★★★ 调参面板：现场优先只改这里 ★★★★★
+#
+# 直接 `python3 competition/info/info_decoder_f4.py` 启动，不需要任何环境变量。
+# 射频档位（增益 / 带宽 / FIR）不在本文件，在 tx_radio4_tunes.py。
 # =============================================================================
-MY_CAMP = "RED"  # /team: 0=红, 1=蓝
+
+# 我方阵营。也可以让 /team 话题在运行中改（0=红, 1=蓝），这里只是开机默认值。
+MY_CAMP = "RED"
+
+# 与 tx_radio4.py 之间的本机管道，端口冲突时才动。
 UDP_IP = "127.0.0.1"
 UDP_PORT = 14346
 RPC_URL = "http://127.0.0.1:8081"
 
-# weak_antijam = 弱信号抗干扰档；baseline = 接近 f3 基线，用来回归
-F4_PROFILE = os.environ.get("INFO_F4_PROFILE", "weak_antijam").strip().lower()
-# Access 容错上限（环境变量可改回 2，更像 f3）
-ACCESS_MAX_HAMMING = int(os.environ.get("INFO_F4_ACCESS_HAMMING", "4"))
-# Header 不允许花码：官方两份长度字段必须一致，且固定为 15
+# Access Code（64bit 同步字）最多允许错几位。
+#   4 = 默认，弱信号下更容易抓到包头，误同步由严格 Header 兜住
+#   2 = 与 f3 一致，更保守；日志里 ac_hits 很多但 Header 全废时改回 2
+ACCESS_MAX_HAMMING = 4
+
+# Header 不允许花码：官方两份长度字段必须一致且固定为 15，放宽必然引入假帧。
+# 除非你确定在做实验，否则不要改这个 0。
 HEADER_MAX_HAMMING = 0
 
 ENABLE_PACKET_WINDOW_RECOVERY = True  # 与 f3 相同的窗口 CRC 复扫
 PACKET_WINDOW_PAYLOADS = 8
 FRAME_DEDUP_TTL_S = 2.0
 
-ENABLE_GRC_WATCHDOG = os.environ.get("RM_ENABLE_GRC_WATCHDOG", "1") not in (
-    "0", "false", "False", "no", "NO",
+# 看门狗：True 时本程序会自动拉起 tx_radio4.py 并在 UDP 断流时重启它。
+# 想手动分两个终端跑（比如要盯频谱窗），把它改成 False，
+# 然后自己先 `python3 tx_radio4.py`。
+ENABLE_GRC_WATCHDOG = True
+GRC_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio4.py"
 )
-GRC_SCRIPT_PATH = os.environ.get(
-    "INFO_GRC_SCRIPT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tx_radio4.py"),
-)
+
 UDP_WATCHDOG_S = 2.0
 GRC_BOOT_WAIT_S = 3.0
-RECORD_STREAM = os.environ.get("INFO_F4_RECORD", "0") in (
-    "1", "true", "True", "yes", "YES",
-)
+
+# 把收到的原始 0/1 存成文本，事后复盘用。弱信号测试时开会增加磁盘 I/O。
+RECORD_STREAM = False
 RECORD_PREFIX = "info_f4_record"
+
 SELF_TEST_ON_START = True
-STAT_INTERVAL_S = 2.0  # 比 f3 更勤：弱信号调参需要更快反馈
+STAT_INTERVAL_S = 2.0  # 统计日志打印间隔，弱信号调参时需要更快反馈
 IDLE_SLEEP_S = 0.001
 BIT_BUFFER_MAX = 50_000
 SERIAL_BUFFER_MAX = 8_192
 # =============================================================================
+
+# 当前射频档位名，只用于日志；真正的值在 tx_radio4_tunes.py 里改。
+F4_PROFILE = tx_radio4_tunes.PROFILE
 
 # 协议常量全部复用 f1（已对齐 V2）
 INFO_FREQ_MAP = base.INFO_FREQ_MAP
