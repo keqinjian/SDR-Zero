@@ -14,9 +14,24 @@ import iio
 import sip
 
 try:
-    from xmlrpc.server import SimpleXMLRPCServer
+    from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 except ImportError:
-    from SimpleXMLRPCServer import SimpleXMLRPCServer
+    from SimpleXMLRPCServer import (
+        SimpleXMLRPCRequestHandler,
+        SimpleXMLRPCServer,
+    )
+
+
+class _QuietXMLRPCRequestHandler(SimpleXMLRPCRequestHandler):
+    """吞掉每次 RPC 的 'POST /RPC2 HTTP/1.1 200 -' 访问日志。
+
+    解码器每 2 秒就要读一次探头、必要时还会切档，默认的 HTTP 处理器会把每次
+    请求都打到 stderr。几分钟就能把终端刷满一屏 200，真正有用的统计行反而
+    被冲掉了，看上去就像程序卡在那里反复重连。
+    """
+
+    def log_message(self, format, *args):  # noqa: A002 - 覆写标准库签名
+        pass
 
 
 WINDOWS = {
@@ -84,7 +99,9 @@ class tx_radio2_flow(gr.top_block, Qt.QWidget):
 
         # XMLRPC 保持 8081，与 f1/f3 兼容；同一时刻只能运行一个信息波 GRC。
         self.xmlrpc_server_0 = SimpleXMLRPCServer(
-            ("localhost", int(rpc_port)), allow_none=True
+            ("localhost", int(rpc_port)),
+            requestHandler=_QuietXMLRPCRequestHandler,
+            allow_none=True,
         )
         self.xmlrpc_server_0.register_instance(self)
         self.xmlrpc_server_0_thread = threading.Thread(

@@ -658,7 +658,15 @@ def extract_air_payloads_soft(
             soft, corr_min=SOFT_CORR_MIN, access_max=access_max
         )
         if found is None:
-            soft = soft[-(AIR_FRAME_SYMBOLS - 1) :]
+            # 整段都没找到 Access。Access 只有 64 个符号，所以还有机会拼出
+            # 包头的只剩最后 63 个符号，保留它们就够了。
+            #
+            # 这里原来保留 AIR_FRAME_SYMBOLS-1（215）个，是压垮 f6 的性能 bug：
+            # 主循环每毫秒才进来约 21 个新符号，却要把已经判过、确定不是包头的
+            # 215 个符号连同新符号一起重新做一遍归一化相关，白做约 8 倍的功。
+            # 实测这一条就让软路径吃满 1.06 倍实时，UDP 缓冲直接溢出，
+            # 表现就是"程序像卡住、所有 Hz 全为 0"。
+            soft = soft[-(AIR_ACCESS_LEN * 8 - 1) :]
             break
         start, inverted, corr, dist = found
         if len(soft) < start + AIR_FRAME_SYMBOLS:
@@ -819,6 +827,20 @@ def run_self_test(node: InfoDecoderNode) -> bool:
         and soft_stats["ac_soft_hits"] >= 28
     )
 
+    # 回归用例：没找到 Access 时只能保留最后 63 个符号。
+    # 保留多了功能上照样"正确"，但每次轮询都会把已经判过的符号重新做一遍
+    # 归一化相关，白做约 8 倍的功，软路径直接吃满实时、UDP 溢出、一帧不出。
+    # 这种性能坑不会报错，只能靠断言守住。
+    noise_stats = _fresh_stats(ACCESS_MAX_HAMMING_LOOSE)
+    noise_soft = [
+        0.5 if (index * 7919) % 3 == 0 else -0.5
+        for index in range(AIR_FRAME_SYMBOLS * 3)
+    ]
+    noise_remain, noise_payloads = extract_air_payloads_soft(
+        noise_soft, noise_stats, ACCESS_MAX_HAMMING_LOOSE
+    )
+    retention_ok = not noise_payloads and len(noise_remain) < AIR_ACCESS_LEN * 8
+
     # 回归用例：软/硬两条路径同时供货一定会毁掉裁判帧。
     # 这里刻意复现旧版的错误合并方式，断言它确实解不出 15 帧，
     # 以后谁再把两条路径接回一起，自检就会立刻报错。
@@ -888,6 +910,7 @@ def run_self_test(node: InfoDecoderNode) -> bool:
         and frame_ok
         and access_adapt_ok
         and single_path_ok
+        and retention_ok
         and clip_ok
     )
     node.get_logger().info(
@@ -897,6 +920,7 @@ def run_self_test(node: InfoDecoderNode) -> bool:
         f"15帧={'通过' if frame_ok else '失败'} "
         f"Access自适应={'通过' if access_adapt_ok else '失败'} "
         f"单路径守恒={'通过' if single_path_ok else '失败'} "
+        f"软缓冲保留={'通过' if retention_ok else '失败'} "
         f"削顶判定={'通过' if clip_ok else '失败'}"
     )
     node.get_logger().info(
