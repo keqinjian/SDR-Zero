@@ -23,14 +23,29 @@ info_decoder_f3_SZU.py —— 信息波抗干扰解码器（无 ROS2 · UDP 原�
     Pluto → 流图解调 ─UDP:14346(裸比特)→ [本程序: 同样的解码链]
                                                        └─ UDP:10001 发原始帧
 
-【怎么在对方机器上替换】
-1) 流图里删掉那个 epy_block，换成一个 UDP Sink：
+【怎么用：推荐方式（连流图都不用管）】
+把这两个文件放在同一个目录：
+
+    info_decoder_f3_SZU.py   ← 本文件
+    tx_radio_szu.py          ← 配套收音机（Pluto 收 + 解调，自带流图）
+
+然后：插上 SDR → `python3 info_decoder_f3_SZU.py` → 下游就有数据了。
+
+本程序的看门狗会自动把 tx_radio_szu.py 拉起来，并在 UDP 断流时重启它，
+所以只开一个终端、跑一条命令。原来监听 10001 的下游程序一行都不用改。
+唯一可能要改的是下面调参面板里的 PLUTO_URI（默认 ip:192.168.2.1）。
+
+【怎么用：想继续用你们自己的流图】
+1) 把调参面板里的 ENABLE_GRC_WATCHDOG 改成 False。
+2) 你们流图里删掉那个 epy_block，换成一个 UDP Sink：
        blocks.udp_sink(gr.sizeof_char, "127.0.0.1", 14346, 1472, True)
    接在原来喂给 epy_block 的那根比特线上（每字节 1 个 bit，和原来一样）。
-2) 跑本程序：
-       python3 info_decoder_f3_SZU.py
-   不需要 ROS2，不需要 numpy，不需要环境变量，只用 Python 标准库。
-3) 原来监听 10001 的下游程序原样跑着，不用动。
+3) 先跑流图，再跑 `python3 info_decoder_f3_SZU.py`。
+
+【依赖】
+本文件只用 Python 标准库：不需要 ROS2、不需要 numpy。
+tx_radio_szu.py 需要 GNU Radio + pyadi/iio（你们既然在跑流图就已经有了）；
+PyQt5 有就开频谱窗，没有就自动转无界面，不影响解码。
 
 【本程序比对方那份多做了什么】（这些正是 f3 的价值，都保留了）
 1) Access 容错：64 位暗号最多错 N 位仍算命中，且**正反相都搜**；
@@ -87,8 +102,17 @@ FORWARD_UNKNOWN_CMD = True
 ENFORCE_CMD_DATA_LEN = True
 
 # ---- 终端显示 ----
-# True = 复刻对方那份的 0.5s 战场快照界面，操作手看到的画面一模一样
-SHOW_MATCH_SNAPSHOT = True
+# 复刻对方那份的 0.5s 战场快照界面，操作手看到的画面一模一样。
+#   "auto" 只有在直接输出到终端时才显示（推荐）
+#   True   永远显示
+#   False  永远不显示
+#
+# 为什么默认 "auto" 而不是 True：快照每秒要写约 1.4KB，而管道缓冲很小
+# （Windows 上只有 4KB）。一旦有人 `python3 xxx.py | tee log.txt` 而 tee 卡住，
+# 或者用某种 supervisor 接管了 stdout 却不读，print 就会阻塞，把整个解码主循环
+# 冻死——帧直接停发，而且**没有任何报错**，看上去就像程序莫名其妙不干活了。
+# 实测中真的踩到过这个坑。输出到终端时不存在这个问题，所以按 TTY 自动判断。
+SHOW_MATCH_SNAPSHOT = "auto"
 SNAPSHOT_INTERVAL_S = 0.5
 
 # ---- 解码参数（与 info_decoder_f3.py 完全相同）----
@@ -105,16 +129,39 @@ ENABLE_PACKET_WINDOW_RECOVERY = True
 PACKET_WINDOW_PAYLOADS = 8       # 8×15B，够盖住最长 0x0A05 及边界
 FRAME_DEDUP_TTL_S = 2.0          # 同一帧 2 秒内不重复往外发
 
-# ---- 看门狗 / 遥控（对方用自己的流图，所以默认全关）----
-# 只有当对方也用我们的 tx_radio2.py 时才把这两个打开。
-ENABLE_GRC_WATCHDOG = False
+# ---- 看门狗：自动拉起配套收音机 ----
+# True  = 本程序自己把 tx_radio_szu.py 拉起来，并在 UDP 断流时自动重启它。
+#         现场流程就变成："插上 SDR → 跑本程序 → 下游有数据"，只开一个终端。
+# False = 你想自己开两个终端分别跑（比如要一直盯着频谱窗调增益）。
+ENABLE_GRC_WATCHDOG = True
 GRC_SCRIPT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "tx_radio2.py"
+    os.path.dirname(os.path.abspath(__file__)), "tx_radio_szu.py"
 )
-ENABLE_XMLRPC_TUNE = False        # 是否通过 XMLRPC 让流图切到己方频点
-RPC_URL = "http://127.0.0.1:8081"
-UDP_WATCHDOG_S = 2.0
-GRC_BOOT_WAIT_S = 3.0
+
+# Pluto 的地址。USB 直连默认网段一般是 192.168.2.1。
+# 不确定就先在终端跑一句 `iio_info -u ip:192.168.2.1`，能出信息就说明对。
+# 这个值会通过命令行传给 tx_radio_szu.py，所以**只改这一处**就够了。
+PLUTO_URI = "ip:192.168.2.1"
+
+# 射频档位，见 tx_radio_szu.py 的 PROFILES：
+#   "balanced"  默认，赛场实测能正常接收
+#   "full_band" 滤波器开到信息波真实带宽 ±270kHz，远距离解不出时试这个
+#   "strong"    近距离信号很强、担心前端削顶时用
+#   "baseline"  最宽松的对照档
+RADIO_PROFILE = "balanced"
+
+# 无界面模式：True = 不开频谱窗（ssh 登录或没接显示器时用）。
+# False 时程序会自己判断有没有图形界面，没有就自动转无界面，不会卡住。
+RADIO_NO_GUI = False
+
+# 是否通过 XMLRPC 让流图切到己方阵营频点（红 433.200 / 蓝 433.920）。
+# 看门狗开着时保持 True 即可，它会在拉起流图后自动对频。
+ENABLE_XMLRPC_TUNE = True
+RPC_PORT = 8081
+RPC_URL = f"http://127.0.0.1:{RPC_PORT}"
+
+UDP_WATCHDOG_S = 2.0   # UDP 断流多久判定流图掉线并重启（秒）
+GRC_BOOT_WAIT_S = 6.0  # 流图启动后等它初始化 Pluto 的时间（秒）
 
 # ---- 杂项 ----
 RECORD_STREAM = False            # 把 0/1 存成文本便于赛后复盘（长时间跑会很大）
@@ -324,6 +371,23 @@ class _Logger:
 #     我们 f1/f3：第 5 个 uint16 是保留位，第 6 个才是哨兵
 #   这里按**对方的理解**显示以保证画面一致；但转发出去的是原始帧，
 #   下游怎么解由下游自己决定，不受这里影响。建议赛前用已知血量核对一次。
+
+def _resolve_snapshot_flag() -> bool:
+    """把 SHOW_MATCH_SNAPSHOT 的 "auto" 解释成实际开关（见调参面板的说明）。"""
+    if isinstance(SHOW_MATCH_SNAPSHOT, str):
+        if SHOW_MATCH_SNAPSHOT.lower() != "auto":
+            raise SystemExit(
+                f"SHOW_MATCH_SNAPSHOT={SHOW_MATCH_SNAPSHOT!r} 不认识；"
+                '只能是 True / False / "auto"'
+            )
+        try:
+            return bool(sys.stdout.isatty())
+        except Exception:
+            return False
+    return bool(SHOW_MATCH_SNAPSHOT)
+
+
+_SNAPSHOT_ON = _resolve_snapshot_flag()
 
 ROBOT_NAMES = ["Hero", "Engineer", "Infantry3", "Infantry4", "Sentry"]
 
@@ -753,7 +817,7 @@ def handle_valid_frame(
     payload = frame[7:7 + data_len]
     node.emit_frame(frame)
 
-    if SHOW_MATCH_SNAPSHOT:
+    if _SNAPSHOT_ON:
         node.fresh_mask |= update_match_state(node.match_state, cmd_id, payload)
 
     if known:
@@ -885,25 +949,72 @@ def _run_self_test_body(node: InfoDecoder) -> bool:
 _grc_process: Optional[subprocess.Popen] = None
 
 
+_POSIX = os.name == "posix"
+
+
 def _kill_grc_tree(proc: subprocess.Popen) -> None:
-    """杀进程组，避免 Qt/GNU Radio 子进程残留占用 Pluto。"""
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except Exception:
+    """
+    杀整个进程组，而不只是 python 本身。
+
+    GNU Radio 会拉起 Qt 和一堆工作线程，只 kill 父进程容易留下僵尸继续占着
+    Pluto，下次重启就会报"设备忙"。所以这里先按进程组发 TERM，2 秒内没退
+    再上 KILL。
+    """
+    if _POSIX:
         try:
-            os.kill(proc.pid, signal.SIGTERM)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    else:
+        try:
+            proc.terminate()
         except Exception:
             pass
+
     try:
         proc.wait(timeout=2)
+        return
     except Exception:
+        pass
+
+    if _POSIX:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except Exception:
             try:
-                os.kill(proc.pid, signal.SIGKILL)
+                proc.kill()
             except Exception:
                 pass
+    else:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _grc_command() -> list[str]:
+    """
+    拼给 tx_radio_szu.py 的命令行。
+
+    所有射频参数都从本文件传过去，这样现场只需要改这一个文件，
+    不会出现"两个文件各写一份、改了一处忘了另一处"的经典事故。
+    """
+    cmd = [
+        sys.executable,
+        GRC_SCRIPT_PATH,
+        "--pluto-uri", PLUTO_URI,
+        "--freq", str(INFO_FREQ_MAP[MY_CAMP]),
+        "--udp-ip", UDP_IP,
+        "--udp-port", str(UDP_PORT),
+        "--rpc-port", str(RPC_PORT),
+        "--profile", RADIO_PROFILE,
+    ]
+    if RADIO_NO_GUI:
+        cmd.append("--no-gui")
+    return cmd
 
 
 def restart_grc(node: InfoDecoder) -> None:
@@ -912,24 +1023,40 @@ def restart_grc(node: InfoDecoder) -> None:
         return
 
     if _grc_process is not None:
-        node.get_logger().warn("看门狗：关闭旧 GRC 进程…")
+        node.get_logger().warn("看门狗：关闭旧收音机进程…")
         _kill_grc_tree(_grc_process)
         _grc_process = None
 
     if not os.path.isfile(GRC_SCRIPT_PATH):
         node.get_logger().error(
-            f"GRC 脚本不存在: {GRC_SCRIPT_PATH}（路径在调参面板的 GRC_SCRIPT_PATH 里改）"
+            f"收音机脚本不存在: {GRC_SCRIPT_PATH}"
+            "（两个文件要放在同一个目录下；路径可在调参面板的 GRC_SCRIPT_PATH 改）"
         )
         return
 
-    node.get_logger().info(f"看门狗：启动 GRC → {GRC_SCRIPT_PATH}")
+    node.get_logger().info(
+        f"看门狗：启动收音机 → {os.path.basename(GRC_SCRIPT_PATH)} "
+        f"| Pluto={PLUTO_URI} | 档位={RADIO_PROFILE} | 频点={INFO_FREQ_MAP[MY_CAMP]/1e6:.3f}MHz"
+    )
     env = os.environ.copy()
+    # 没有显示服务时让 Qt 走 offscreen，免得流图因为开不出窗口直接退出。
     if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
         env.setdefault("QT_QPA_PLATFORM", "offscreen")
-    _grc_process = subprocess.Popen(
-        [sys.executable, GRC_SCRIPT_PATH], env=env, start_new_session=True
-    )
+
+    popen_kwargs = {"env": env}
+    if _POSIX:
+        popen_kwargs["start_new_session"] = True
+    _grc_process = subprocess.Popen(_grc_command(), **popen_kwargs)
+
+    # 给 Pluto 初始化留时间；这段时间内收不到 UDP 是正常的，不要让看门狗
+    # 立刻又判定断流去重启，否则会陷入"起来就杀"的死循环。
     time.sleep(GRC_BOOT_WAIT_S)
+
+    if _grc_process.poll() is not None:
+        node.get_logger().error(
+            f"收音机进程启动后立刻退出（返回码 {_grc_process.returncode}）。"
+            f"多半是 SDR 没连上，先试： iio_info -u {PLUTO_URI}"
+        )
     connect_grc(node)
 
 
@@ -990,7 +1117,8 @@ def main() -> None:
 
     node.get_logger().info(
         f"收比特 {UDP_IP}:{UDP_PORT} → 转发原始帧 {OUT_UDP_IP}:{OUT_UDP_PORT} | "
-        f"未知cmd转发={'是' if FORWARD_UNKNOWN_CMD else '否'}"
+        f"未知cmd转发={'是' if FORWARD_UNKNOWN_CMD else '否'} | "
+        f"战场快照={'开' if _SNAPSHOT_ON else '关(非终端输出)'}"
     )
 
     bit_buffer = ""
@@ -1087,7 +1215,7 @@ def main() -> None:
                         frame, "window", node, packet_counter, stats, dedupe, now
                     )
 
-            if SHOW_MATCH_SNAPSHOT and now - last_snapshot >= SNAPSHOT_INTERVAL_S:
+            if _SNAPSHOT_ON and now - last_snapshot >= SNAPSHOT_INTERVAL_S:
                 node.snapshot_counter += 1
                 if node.fresh_mask == 0x1F:
                     print("\r\n[+] Perfect! All 5 types of data updated within "
